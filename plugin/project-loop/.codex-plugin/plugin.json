@@ -1,0 +1,20 @@
+{
+  "name": "project-loop",
+  "version": "0.1.0",
+  "description": "Run approval-gated project definition, planning, execution, review, and closeout loops.",
+  "author": {
+    "name": "inno"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["planning", "workflow", "project", "coordination"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Project Loop",
+    "shortDescription": "Approval-gated project delivery loop",
+    "longDescription": "Define projects, plan one milestone, compile execution prompts, run bounded work, verify results, and report status.",
+    "developerName": "inno",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Initialize this repository with Project Loop.", "Plan the next approved Project Loop milestone.", "Show the current Project Loop status."]
+  }
+}

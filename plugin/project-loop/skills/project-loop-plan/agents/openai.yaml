@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Loop Plan"
+  short_description: "Plan one approved roadmap milestone in detail"
+  default_prompt: "Use $project-loop-plan to plan the active milestone."
