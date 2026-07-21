@@ -1,0 +1,20 @@
+goal: 기존 project-loop를 논리적으로 대체할 신규 inno-loop-engineering의 개발개요 Markdown 요구사항 문서를 작성한다
+task_type: requirements_document
+constraints:
+  - 신규 시스템은 project-init, project-plan, project-run, project-review 네 loop만 사용한다.
+  - leader 기준 sub-agent depth는 3 이하이며 모델은 gpt-5.6-terra 이하, effort는 medium 이하다.
+  - noncritical 내부 작업은 자율 실행하고, critical 또는 uncertain risk는 fail-closed 한다.
+  - 기존 project-loop의 호환성과 마이그레이션은 범위 밖이다.
+acceptance_criteria:
+  - 개발개요에 네 loop의 입력, 산출물, 책임, 상태 전이, exit check, 증거를 담은 표가 있다.
+  - 개발개요에 versioned state, provenance, checkpoint, evidence, derived prompt invalidation 계약이 있다.
+  - 개발개요에 다섯 사람 승인 범주, approval payload, timeout BLOCKED 규칙이 있다.
+  - 개발개요에 동일 실패 3회, 품질/수용기준 미달 2회, 검증 불가 2회, 예산 초과 BLOCKED 규칙이 있다.
+  - 개발개요에 COMPLETE, REPLAN, BLOCKED, DEFERRED_BACKLOG review outcome과 backlog 요건이 있다.
+  - 개발개요에 agent write ownership, model/effort preflight, 독립 judge 규칙이 있다.
+  - 개발개요에 상태, 승인, 복구, 회귀, malformed input, end-to-end fixture 검증 체크리스트가 있다.
+metadata:
+  seed_id: seed_19b4582b7730
+  interview_id: interview_20260721_140742
+  qa_best_score: 0.84
+  qa_status: user_accepted_below_threshold

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inno Loop Engineering — 사용 설명서</title>
+  <style>
+    :root { --ink:#132238; --muted:#5e6a78; --paper:#f6f7f2; --panel:#fffefb; --line:#cfd8d3; --loop:#086b67; --warn:#a63d27; --code:#18272d; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.7 ui-sans-serif,system-ui,-apple-system,"Noto Sans KR",sans-serif; }
+    .wrap { max-width:1120px; margin:auto; padding:24px; }
+    header { padding:54px 0 36px; border-bottom:1px solid var(--line); display:grid; grid-template-columns:1fr auto; gap:28px; align-items:end; }
+    h1 { font-size:clamp(2.3rem,7vw,5rem); letter-spacing:-.075em; line-height:.92; margin:0; max-width:760px; }
+    h1 span { color:var(--loop); display:block; font-size:.36em; letter-spacing:.12em; text-transform:uppercase; margin:0 0 16px 6px; }
+    .stamp { border:1px solid var(--loop); color:var(--loop); padding:8px 12px; font:700 .72rem/1 ui-monospace,monospace; letter-spacing:.08em; }
+    .lede { max-width:720px; color:var(--muted); font-size:1.13rem; margin:26px 0 0; }
+    main { display:grid; grid-template-columns:210px minmax(0,1fr); gap:42px; padding-top:36px; }
+    nav { position:sticky; top:18px; align-self:start; border-left:2px solid var(--line); padding-left:14px; }
+    nav a { display:block; color:var(--muted); text-decoration:none; font-size:.88rem; padding:6px 0; } nav a:hover { color:var(--loop); }
+    section { margin:0 0 56px; scroll-margin-top:20px; }
+    h2 { font-size:1.65rem; letter-spacing:-.04em; margin:0 0 14px; }
+    h3 { font-size:1.03rem; margin:24px 0 8px; }
+    .callout { background:#e8f2ef; border-left:5px solid var(--loop); padding:16px 18px; margin:20px 0; }
+    .warning { background:#fff0e9; border-left-color:var(--warn); }
+    .rail { display:grid; grid-template-columns:repeat(4,1fr); gap:0; margin:24px 0; overflow:auto; }
+    .rail div { min-width:125px; padding:14px 13px; background:var(--panel); border:1px solid var(--line); border-right:0; font-weight:700; font-size:.88rem; }
+    .rail div:last-child { border-right:1px solid var(--line); } .rail b { display:block; color:var(--loop); font:700 .72rem ui-monospace,monospace; margin-bottom:6px; }
+    pre { margin:14px 0; padding:18px; overflow:auto; background:var(--code); color:#e7f4ef; border-radius:3px; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    code { font: .9em ui-monospace,SFMono-Regular,Consolas,monospace; background:#e7ece8; padding:1px 4px; }
+    pre code { background:transparent; padding:0; }
+    table { border-collapse:collapse; width:100%; font-size:.92rem; background:var(--panel); }
+    th,td { padding:11px; text-align:left; vertical-align:top; border:1px solid var(--line); } th { background:#edf1ed; }
+    .check { list-style:none; padding:0; } .check li { padding:5px 0 5px 28px; position:relative; } .check li:before { content:"✓"; position:absolute; left:3px; color:var(--loop); font-weight:800; }
+    footer { border-top:1px solid var(--line); color:var(--muted); padding:26px 0 48px; font-size:.85rem; }
+    @media (max-width:760px) { header,main { display:block; } .stamp { display:inline-block; margin-top:20px; } nav { display:none; } .wrap { padding:18px; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div><h1><span>four-loop field guide</span>Inno Loop<br>Engineering</h1><p class="lede">프로젝트 폴더마다 독립된 상태를 만들고, init → plan → run → review 흐름을 evidence와 함께 관리합니다.</p></div>
+      <div class="stamp">v0.1 · LOCAL CLI</div>
+    </header>
+    <main>
+      <nav><a href="#before">시작 전</a><a href="#anywhere">어느 폴더에서나</a><a href="#flow">4-loop 흐름</a><a href="#blocked">승인과 BLOCKED</a><a href="#sessions">다른 Codex 세션</a><a href="#troubleshoot">점검</a></nav>
+      <article>
+        <section id="before"><h2>시작 전</h2><p>현재 플러그인 소스는 이 저장소의 <code>plugin/inno-loop-engineering</code>에 있습니다. 각 대상 프로젝트에는 상태 파일 <code>.inno-loop/state.json</code>이 생성됩니다. 따라서 여러 프로젝트를 동시에 다뤄도 상태는 섞이지 않습니다.</p><div class="callout"><strong>설치됨:</strong> 플러그인은 개인 <code>personal</code> marketplace에 등록되어 있고 Codex에 설치되어 있습니다. 새 Codex 세션에서 <code>$inno-loop-*</code> skill 이름으로 사용할 수 있습니다.</div></section>
+        <section id="anywhere"><h2>다른 프로젝트·폴더에서 시작하기</h2><p>플러그인이 설치되기 전에도, 이 저장소에 접근할 수 있다면 아래처럼 CLI를 직접 호출할 수 있습니다. <code>PROJECT_ROOT</code>만 바꾸면 됩니다.</p><pre><code>PLUGIN_ROOT=/home/inno/repo/inno-loop-engineering/plugin/inno-loop-engineering
+PROJECT_ROOT=/path/to/another-project
+
+# intent.md의 내용은 데이터로 전달합니다.
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" \
+  --project-root "$PROJECT_ROOT" \
+  init --intent "$(cat "$PROJECT_ROOT/intent.md")" --source-ref intent.md
+
+# 현재 상태 확인 (read-only)
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" status</code></pre><p><code>init</code>은 빈 입력과 과도하게 큰 입력을 거부합니다. 다른 프로젝트에서 다시 시작하려면 새 <code>PROJECT_ROOT</code>로 <code>init</code>을 실행하세요.</p></section>
+        <section id="flow"><h2>4-loop 흐름</h2><div class="rail"><div><b>01</b>project-init</div><div><b>02</b>project-plan</div><div><b>03</b>project-run</div><div><b>04</b>project-review</div></div><pre><code># init 이후, 근거를 남기며 순서대로 전이합니다.
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" plan --evidence charter-design-roadmap
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" run --evidence plan-v1
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" review --evidence test-report
+
+# 모든 수용 기준이 통과했을 때만 완료합니다.
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" review-complete --evidence review-pass</code></pre><table><thead><tr><th>상태</th><th>다음 행동</th><th>남기는 근거</th></tr></thead><tbody><tr><td>project-init</td><td>의도·가정·목표 확정 후 plan</td><td>charter/design/roadmap</td></tr><tr><td>project-plan</td><td>작업·검증·예산 동결 후 run</td><td>plan hash, validation matrix</td></tr><tr><td>project-run</td><td>변경·테스트 근거 후 review</td><td>run log, command/test evidence</td></tr><tr><td>project-review</td><td>complete, replan, blocked, defer</td><td>criterion 판정과 remediation</td></tr></tbody></table></section>
+        <section id="blocked"><h2>승인과 BLOCKED</h2><p>외부/비가역 작업, 보안·개인정보·비밀정보, 한도 초과, intent 밖 범위·핵심 아키텍처 변경, 반복 평가 실패는 자동 진행하지 않습니다.</p><pre><code># 실제 외부 행동을 하지 않습니다. 승인 요청만 상태에 기록합니다.
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" \
+  request-approval --category external_irreversible \
+  --action publish --impact public --alternatives "do not publish" --decision approve
+
+# 기록된 사람 승인 근거가 있을 때 재개합니다.
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" \
+  resume --evidence approval-ticket-123</code></pre><div class="callout warning"><strong>무응답은 승인 아님.</strong> 불확실한 위험도 <code>BLOCKED</code>로 남겨야 합니다.</div></section>
+        <section id="sessions"><h2>다른 Codex 세션에서 skill로 사용하기</h2><p>플러그인은 개인 <code>personal</code> marketplace에 설치되었습니다. <strong>새 Codex 세션</strong>을 열면 skill을 자동 발견할 수 있습니다.</p><div class="callout"><strong>전체 loop:</strong> 대상 프로젝트에서 <code>intent.md를 기준으로 inno-loop 수행 부탁해</code>라고 요청하거나 <code>$inno-loop</code>을 사용하세요. <code>intend.md</code>도 별칭으로 허용하지만 둘 다 있으면 안전하게 <code>BLOCKED</code>됩니다.</div><ul class="check"><li><code>$inno-loop</code> — init, plan, run, review, replan을 COMPLETE 또는 BLOCKED까지 수행</li><li><code>$inno-loop-init</code> — 검증된 intent로 상태 생성</li><li><code>$inno-loop-plan</code> — init 근거를 plan으로 전이</li><li><code>$inno-loop-run</code> — 계획 근거로 실행 단계 시작</li><li><code>$inno-loop-review</code> — review 진입, complete 또는 replan</li><li><code>$inno-loop-status</code> — 상태를 읽기 전용으로 확인</li></ul><p>새 세션에서도 프로젝트별 <code>PROJECT_ROOT</code>만 지정하면 상태는 서로 분리됩니다. 설치 전 또는 shell 자동화가 필요하면 위 CLI 방식을 사용하세요.</p></section>
+        <section id="troubleshoot"><h2>점검과 문제 해결</h2><ul class="check"><li><code>status</code>로 현재 loop와 <code>outcome</code>을 먼저 확인합니다.</li><li><code>BLOCKED</code>라면 block reason과 evidence를 확인하고, 자동 복구 가능 여부를 판단합니다.</li><li>현재 수용 기준 미달은 <code>replan --evidence ...</code>으로만 plan에 되돌립니다.</li><li>비차단·저우선 항목만 <code>defer --impact ... --rationale ... --owner ... --revisit-trigger ...</code>로 보류합니다.</li></ul><pre><code># 현재 criterion이 통과하지 않아 계획으로 되돌릴 때
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" \
+  replan --evidence criterion-3-failed
+
+# 비차단 backlog를 명시적으로 보류할 때
+python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" \
+  defer --impact low --rationale "next release" --owner team --revisit-trigger next-release</code></pre></section>
+      </article>
+    </main>
+    <footer>Inno Loop Engineering · 상태는 프로젝트별 <code>.inno-loop/state.json</code>에 저장됩니다.</footer>
+  </div>
+</body>
+</html>

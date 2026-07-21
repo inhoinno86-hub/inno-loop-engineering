@@ -1,4 +1,0 @@
-interface:
-  display_name: "Project Loop Status"
-  short_description: "Report project-loop progress without mutations"
-  default_prompt: "Use $project-loop-status to report this project status."

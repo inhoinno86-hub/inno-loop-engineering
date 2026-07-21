@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "run_id": "__RUN_ID__",
+  "current_loop": "project-init",
+  "outcome": null,
+  "input_hash": "__INPUT_HASH__",
+  "artifact_version": 1,
+  "checkpoint": null,
+  "decision_log": [],
+  "assumption_log": [],
+  "verification_evidence": [],
+  "remediation_packet": null,
+  "backlog": [],
+  "block": null,
+  "failure_history": []
+}

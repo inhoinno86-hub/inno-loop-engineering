@@ -1,4 +1,0 @@
-interface:
-  display_name: "Project Loop Run"
-  short_description: "Execute an approved plan through bounded loops"
-  default_prompt: "Use $project-loop-run to execute the approved milestone plan."

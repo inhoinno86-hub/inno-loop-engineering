@@ -1,4 +1,0 @@
-interface:
-  display_name: "Project Loop Init"
-  short_description: "Initialize an approval-gated project lifecycle"
-  default_prompt: "Use $project-loop-init to initialize this project lifecycle."

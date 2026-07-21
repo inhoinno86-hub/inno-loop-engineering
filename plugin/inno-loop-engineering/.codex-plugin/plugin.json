@@ -1,0 +1,18 @@
+{
+  "name": "inno-loop-engineering",
+  "version": "0.1.0+codex.20260721151240",
+  "description": "Four-loop autonomous project engineering with evidence and critical-only approval gates.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Inno Loop Engineering",
+    "shortDescription": "Use Inno Loop Engineering in Codex.",
+    "longDescription": "Inno Loop Engineering manages init, plan, run, and review loops with durable evidence, bounded recovery, and critical-only approvals.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Run the full Inno Loop Engineering lifecycle from intent.md, stopping only for approval-required risks."
+  }
+}
