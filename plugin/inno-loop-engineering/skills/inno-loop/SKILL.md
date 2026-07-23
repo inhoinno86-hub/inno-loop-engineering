@@ -13,7 +13,7 @@ Use this skill when user asks to run `inno-loop`, run a full development loop, o
 2. Resolve the plugin root that contains this skill, then inspect existing state first:
 
    ```bash
-   if [ -f "$PROJECT_ROOT/.inno-loop/state.json" ]; then
+   if [ -f "$PROJECT_ROOT/.loop-engine/state.json" ]; then
      python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" status
    else
      python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" init-auto
@@ -21,11 +21,11 @@ Use this skill when user asks to run `inno-loop`, run a full development loop, o
    ```
 
    `init-auto` accepts `intent.md` first, or legacy alias `intend.md`. If both exist, neither exists, or input is invalid, report `BLOCKED` and do not choose or create an input file.
-3. If `.inno-loop/state.json` already exists, continue from its current non-blocked loop. Resume only with recorded approval evidence. Never overwrite existing state with `init-auto`.
+3. If `.loop-engine/state.json` already exists, continue from its current non-blocked loop. Resume only with recorded approval evidence. Never overwrite existing state with `init-auto`.
 
 ## Full loop
 
-Work through these phases in order. Create versioned artifacts under `.inno-loop/artifacts/` and use their relative paths as evidence. Do not claim evidence that was not created or observed.
+Work through these phases in order. Create versioned artifacts under `.loop-engine/artifacts/` and use their relative paths as evidence. Do not claim evidence that was not created or observed.
 
 1. **project-init** — Inspect existing project and intent. Write `charter.md`, `design.md`, `roadmap.md`, assumptions, success criteria, non-goals, risk and approval policy. Then run `plan --evidence <charter/design/roadmap refs>`.
 2. **project-plan** — Write `execution-plan.md` and `validation-matrix.md`: ordered tasks, owner, dependencies, DoD, validation, rollback, and bounded budget. Then run `run --evidence <plan refs>`.
