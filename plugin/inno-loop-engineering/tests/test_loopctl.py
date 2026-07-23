@@ -22,7 +22,7 @@ class LoopCtlTest(unittest.TestCase):
             self.invoke(root, "plan", "--evidence", "charter")
             self.invoke(root, "run", "--evidence", "plan")
             self.invoke(root, "review", "--evidence", "run-evidence")
-            state_path = root / ".inno-loop/state.json"; before = state_path.read_bytes()
+            state_path = root / ".loop-engine/state.json"; before = state_path.read_bytes()
             status = self.invoke(root, "status")
             self.assertEqual(before, state_path.read_bytes())
             self.assertEqual(json.loads(status.stdout)["current_loop"], "project-review")
@@ -66,10 +66,10 @@ class LoopCtlTest(unittest.TestCase):
             root = Path(temp)
             (root / "intent.md").write_text("fixture", encoding="utf-8")
             self.invoke(root, "init-auto")
-            before = (root / ".inno-loop/state.json").read_bytes()
+            before = (root / ".loop-engine/state.json").read_bytes()
             result = self.invoke(root, "init-auto", ok=False)
             self.assertEqual(result.returncode, 2)
-            self.assertEqual((root / ".inno-loop/state.json").read_bytes(), before)
+            self.assertEqual((root / ".loop-engine/state.json").read_bytes(), before)
 
 
 if __name__ == "__main__":

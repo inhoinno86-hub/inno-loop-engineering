@@ -16,7 +16,7 @@ APPROVAL_CATEGORIES = (
     "external_irreversible", "security_privacy_secrets", "budget_limit_breach",
     "intent_or_core_architecture_change", "repeated_evaluation_failure",
 )
-STATE_RELATIVE = Path(".inno-loop/state.json")
+STATE_RELATIVE = Path(".loop-engine/state.json")
 MAX_INPUT_BYTES = 1_000_000
 
 
