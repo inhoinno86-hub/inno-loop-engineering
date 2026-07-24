@@ -25,6 +25,12 @@
 
 review가 현재 수용 기준 미달이면 `project-plan`으로만 돌아가 다시 수행한다. 모든 기준이 통과하면 `COMPLETE`다.
 
+`$inno-loop` 호출은 `project-init`과 `project-plan`에 한해 Ouroboros `interview`, Superpowers `brainstorming`, `writing-plans` 사용의 명시 opt-in이다. 각 loop는 세 도구의 evidence를 남겨야 다음 상태로 전이할 수 있다. 도구가 없거나 실패하면 일반 Codex로 대체하지 않고 `BLOCKED`된다.
+
+동일 요청은 내부 lifecycle 실행 계획의 실행 권한도 부여한다. 안전 `BLOCKED`가 없는 한 `init → plan → run → review`를 같은 요청에서 계속 진행하며, plan의 별도 사용자 승인을 기다리지 않는다.
+
+Review의 `REPLAN`은 종료 결과가 아니다. remediation packet을 입력으로 새 `project-plan` iteration을 즉시 시작하며, 기본 3회까지 자동 반복한다. 한도 초과는 `BLOCKED`다.
+
 ## 안전 경계
 
 다음은 자동 진행하지 않고 승인 요청 후 `BLOCKED`된다.

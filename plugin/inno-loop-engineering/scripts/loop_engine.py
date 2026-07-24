@@ -11,13 +11,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LOOPS = ("project-init", "project-plan", "project-run", "project-review")
-OUTCOMES = ("COMPLETE", "REPLAN", "BLOCKED", "DEFERRED_BACKLOG")
+OUTCOMES = ("COMPLETE", "BLOCKED", "DEFERRED_BACKLOG")
 APPROVAL_CATEGORIES = (
     "external_irreversible", "security_privacy_secrets", "budget_limit_breach",
     "intent_or_core_architecture_change", "repeated_evaluation_failure",
 )
+REQUIRED_INTEGRATIONS = (
+    "ouroboros-interview", "superpowers-brainstorming", "superpowers-writing-plans",
+)
+INTEGRATION_STATUSES = ("USED", "UNAVAILABLE", "FAILED")
 STATE_RELATIVE = Path(".inno-loop/state.json")
 MAX_INPUT_BYTES = 1_000_000
+DEFAULT_MAX_REPLANS = 3
 
 
 class PolicyError(ValueError):
@@ -64,6 +69,16 @@ def load(project_root: Path) -> dict:
     state = json.loads(path.read_text(encoding="utf-8"))
     if state.get("schema_version") != 1:
         raise PolicyError("unknown state schema")
+    if state.get("outcome") == "REPLAN":
+        state["outcome"] = None
+        state["last_review_outcome"] = "REPLAN"
+        if not state.get("replan_history") and state.get("remediation_packet"):
+            state["replan_history"] = [state["remediation_packet"]]
+        state["plan_iteration"] = max(state.get("plan_iteration", 1), state.get("replan_count", 0) + 1)
+    state.setdefault("max_replans", DEFAULT_MAX_REPLANS)
+    state.setdefault("replan_history", [])
+    state.setdefault("last_review_outcome", None)
+    state.setdefault("plan_iteration", 1)
     return state
 
 
@@ -72,14 +87,18 @@ def save(project_root: Path, state: dict):
     atomic_write(state_path(project_root), state)
 
 
-def initialize(project_root: Path, intent: str, source_ref: str = "inline") -> dict:
+def initialize(project_root: Path, intent: str, source_ref: str = "inline", full_lifecycle: bool = False, max_replans: int = DEFAULT_MAX_REPLANS) -> dict:
     if state_path(project_root).exists():
         raise PolicyError("state already exists")
     record = input_record(intent, source_ref)
+    if max_replans < 1:
+        raise PolicyError("max replans must be positive")
     state = {
         "schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None,
         "input_hash": record["content_hash"], "input": record, "artifact_version": 1, "checkpoint": None,
-        "decision_log": [], "assumption_log": [], "verification_evidence": [], "remediation_packet": None,
+        "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "initial inno-loop invocation", "recorded_at": now()} if full_lifecycle else None,
+        "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1,
+        "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "remediation_packet": None,
         "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now(),
     }
     save(project_root, state)
@@ -104,6 +123,61 @@ def approval_request(state: dict, category: str, action: str, impact: str, alter
     state["approval_request"] = request
 
 
+def authorize_lifecycle(state: dict, evidence: str):
+    if not evidence:
+        raise PolicyError("lifecycle authorization evidence required")
+    state["lifecycle_authorization"] = {"scope": "full-lifecycle", "evidence": redact(evidence), "recorded_at": now()}
+    add_evidence(state, "lifecycle-authorization", evidence)
+    if state.get("outcome") == "BLOCKED" and (state.get("block") or {}).get("reason") == "full_lifecycle_authorization_required":
+        state["outcome"] = None
+        state["block"] = None
+        add_evidence(state, "resume", evidence)
+
+
+def lifecycle_authorized(state: dict):
+    authorization = state.get("lifecycle_authorization") or {}
+    if authorization.get("scope") == "full-lifecycle":
+        return
+    reason = "full lifecycle authorization required before project-run"
+    block(state, "full_lifecycle_authorization_required", True, reason)
+    raise PolicyError(reason)
+
+
+def record_integration(state: dict, loop: str, name: str, status: str, evidence: str, artifact_ref: str | None = None, content_hash: str | None = None):
+    if loop not in ("project-init", "project-plan"):
+        raise PolicyError("integration loop is not supported")
+    if loop != state.get("current_loop"):
+        raise PolicyError("integration loop does not match current loop")
+    if name not in REQUIRED_INTEGRATIONS:
+        raise PolicyError("unknown required integration")
+    if status not in INTEGRATION_STATUSES:
+        raise PolicyError("unknown integration status")
+    if not evidence:
+        raise PolicyError("integration evidence required")
+    if status == "USED" and (not artifact_ref or not content_hash):
+        raise PolicyError("used integration requires artifact and content hash")
+    iteration = state.get("plan_iteration", 1) if loop == "project-plan" else 1
+    record = {"loop": loop, "iteration": iteration, "name": name, "status": status, "evidence": redact(evidence), "recorded_at": now()}
+    if artifact_ref:
+        record["artifact_ref"] = artifact_ref
+    if content_hash:
+        record["content_hash"] = content_hash
+    state.setdefault("integration_evidence", []).append(record)
+    add_evidence(state, "integration", json.dumps(record, sort_keys=True))
+    if status != "USED":
+        block(state, "required_integration_" + status.lower(), False, json.dumps(record, sort_keys=True))
+
+
+def required_integrations_used(state: dict, loop: str):
+    iteration = state.get("plan_iteration", 1) if loop == "project-plan" else 1
+    used = {item["name"] for item in state.get("integration_evidence", []) if item["loop"] == loop and item.get("iteration", 1) == iteration and item["status"] == "USED"}
+    missing = set(REQUIRED_INTEGRATIONS) - used
+    if missing:
+        reason = "required integrations missing: " + ", ".join(sorted(missing))
+        block(state, "required_integrations_missing", False, reason)
+        raise PolicyError(reason)
+
+
 def transition(state: dict, event: str, evidence: str = "", backlog: dict | None = None):
     if state.get("outcome") == "BLOCKED" and event != "resume":
         raise PolicyError("blocked state requires resume")
@@ -115,6 +189,10 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
         source, target = expected[event]
         if current != source:
             raise PolicyError("illegal transition")
+        if current in ("project-init", "project-plan"):
+            required_integrations_used(state, current)
+        if current == "project-plan":
+            lifecycle_authorized(state)
         state["current_loop"] = target
         add_evidence(state, event, evidence)
         return
@@ -123,8 +201,14 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
         state["outcome"] = "COMPLETE"; add_evidence(state, event, evidence); return
     if event == "replan":
         if current != "project-review": raise PolicyError("only review can replan")
-        state["current_loop"] = "project-plan"; state["outcome"] = "REPLAN"; state["replan_count"] += 1
-        state["remediation_packet"] = {"evidence": redact(evidence), "created_at": now()}; return
+        next_count = state.get("replan_count", 0) + 1
+        if next_count > state.get("max_replans", DEFAULT_MAX_REPLANS):
+            block(state, "max_replans_exceeded", True, evidence)
+            return
+        packet = {"evidence": redact(evidence), "created_at": now(), "replan_count": next_count}
+        state["current_loop"] = "project-plan"; state["outcome"] = None; state["last_review_outcome"] = "REPLAN"
+        state["replan_count"] = next_count; state["plan_iteration"] = state.get("plan_iteration", 1) + 1
+        state["remediation_packet"] = packet; state.setdefault("replan_history", []).append(packet); add_evidence(state, "replan", evidence); return
     if event == "defer":
         if current != "project-review" or not backlog: raise PolicyError("review backlog required")
         required = {"impact", "rationale", "owner", "revisit_trigger"}

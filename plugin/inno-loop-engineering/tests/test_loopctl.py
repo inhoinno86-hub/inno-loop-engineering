@@ -15,11 +15,20 @@ class LoopCtlTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
+    def record_required_integrations(self, root, loop):
+        for name in ("ouroboros-interview", "superpowers-brainstorming", "superpowers-writing-plans"):
+            artifact = root / "artifacts" / loop / f"{name}.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(name, encoding="utf-8")
+            self.invoke(root, "record-integration", "--loop", loop, "--name", name, "--status", "USED", "--artifact", str(artifact.relative_to(root)))
+
     def test_complete_status_and_deferred_backlog(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self.invoke(root, "init", "--intent", "fixture")
+            self.invoke(root, "init", "--intent", "fixture", "--full-lifecycle")
+            self.record_required_integrations(root, "project-init")
             self.invoke(root, "plan", "--evidence", "charter")
+            self.record_required_integrations(root, "project-plan")
             self.invoke(root, "run", "--evidence", "plan")
             self.invoke(root, "review", "--evidence", "run-evidence")
             state_path = root / ".inno-loop/state.json"; before = state_path.read_bytes()
@@ -70,6 +79,51 @@ class LoopCtlTest(unittest.TestCase):
             result = self.invoke(root, "init-auto", ok=False)
             self.assertEqual(result.returncode, 2)
             self.assertEqual((root / ".inno-loop/state.json").read_bytes(), before)
+
+    def test_transition_requires_integration_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.invoke(root, "init", "--intent", "fixture")
+            missing = self.invoke(root, "plan", "--evidence", "charter", ok=False)
+            self.assertEqual(missing.returncode, 2)
+            blocked = self.invoke(root, "status")
+            self.assertEqual(json.loads(blocked.stdout)["outcome"], "BLOCKED")
+            self.invoke(root, "resume", "--evidence", "integration preflight rerun")
+            self.record_required_integrations(root, "project-init")
+            planned = self.invoke(root, "plan", "--evidence", "charter")
+            self.assertEqual(json.loads(planned.stdout)["current_loop"], "project-plan")
+
+    def test_full_lifecycle_authorization_reaches_complete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.invoke(root, "init", "--intent", "fixture", "--full-lifecycle")
+            self.record_required_integrations(root, "project-init")
+            self.invoke(root, "plan", "--evidence", "charter")
+            self.record_required_integrations(root, "project-plan")
+            self.invoke(root, "run", "--evidence", "plan")
+            self.invoke(root, "review", "--evidence", "run")
+            complete = self.invoke(root, "review-complete", "--evidence", "review")
+            self.assertEqual(json.loads(complete.stdout)["outcome"], "COMPLETE")
+
+    def test_replan_immediately_starts_next_plan_iteration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.invoke(root, "init", "--intent", "fixture", "--full-lifecycle", "--max-replans", "2")
+            self.record_required_integrations(root, "project-init")
+            self.invoke(root, "plan", "--evidence", "charter")
+            self.record_required_integrations(root, "project-plan")
+            self.invoke(root, "run", "--evidence", "plan")
+            self.invoke(root, "review", "--evidence", "run")
+            replanned = self.invoke(root, "replan", "--evidence", "criterion-1")
+            replanned_state = json.loads(replanned.stdout)
+            self.assertEqual(replanned_state["current_loop"], "project-plan")
+            self.assertIsNone(replanned_state["outcome"])
+            self.assertEqual(replanned_state["plan_iteration"], 2)
+            self.record_required_integrations(root, "project-plan")
+            self.invoke(root, "run", "--evidence", "remediation-plan")
+            self.invoke(root, "review", "--evidence", "remediation-run")
+            complete = self.invoke(root, "review-complete", "--evidence", "review")
+            self.assertEqual(json.loads(complete.stdout)["outcome"], "COMPLETE")
 
 
 if __name__ == "__main__":
