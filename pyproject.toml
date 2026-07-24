@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inno-loop-engineering"
+version = "0.1.0"
+description = "Local-only loop-engine shared core and CLI"
+requires-python = ">=3.10"
+
+[project.scripts]
+loop-engine = "loop_engine.cli:main"
+
+[tool.setuptools]
+packages = ["loop_engine"]

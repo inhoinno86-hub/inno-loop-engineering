@@ -2,12 +2,12 @@
 
 `inno-loop-engineering`은 `intent.md`를 입력으로 받아 개발을 **project-init → project-plan → project-run → project-review**로 반복하는 Codex 플러그인이다. 일반 내부 개발·검증은 자동 진행하고, 승인 필요 위험은 `BLOCKED`에서 멈춘다.
 
-> **Shared Core**: 이 플러그인은 `loop_engine` pip 패키지를 Shared Core로 사용한다.
-> 핵심 정책 스펙(승인 정책·상태 기계·아티팩트 계약)은 `loop_engine/docs/spec/`을 단일 진실 출처로 참조한다.
+> **Shared Core**: 이 저장소가 소유한 Python package `loop_engine`이 Shared Core다.
+> 외부 또는 내부/company `loop_engine` 패키지·저장소에 의존하지 않는다.
 
 ## 빠른 시작
 
-1. 대상 프로젝트 루트에 `intent.md`를 작성한다. 기존 이름 `intend.md`도 별칭으로 읽을 수 있다.
+1. 대상 프로젝트 루트에 `intent.md`를 작성한다. 기존 이름 `intend.md`도 별칭으로 읽을 수 있다. 또는 요청에서 프로젝트 내부의 단일 UTF-8 파일을 명시 입력으로 지정할 수 있다.
 2. 새 Codex 세션을 연다.
 3. 다음처럼 요청한다.
 
@@ -15,7 +15,23 @@
    $inno-loop intent.md를 기준으로 inno-loop 수행 부탁해
    ```
 
-`intent.md를 기준으로 inno-loop 수행 부탁해` 같은 자연어 요청도 전체-loop skill의 대상이다. `intent.md`와 `intend.md`가 함께 있거나 둘 다 없으면 입력 모호성으로 `BLOCKED`된다.
+`intent.md를 기준으로 inno-loop 수행 부탁해`, `loop engine으로 수행 부탁해`, `루프 엔진으로 수행해줘`, `asdf.md를 기준으로 loop engine 수행 부탁해` 같은 자연어 요청도 전체-loop skill의 대상이다. 명시 입력은 프로젝트 루트 내부의 단일 UTF-8 regular file이어야 한다. 명시 입력이 없을 때 `intent.md`와 `intend.md`가 함께 있거나 둘 다 없으면 입력 모호성으로 `BLOCKED`된다.
+
+## 여러 lifecycle run
+
+각 lifecycle은 별도 run ID와 상태·artifact·registry를 가진다.
+
+```text
+.loop-engine/runs/<run-id>/state.json
+.loop-engine/runs/<run-id>/artifacts/
+.loop-engine/runs/<run-id>/registry.json
+.loop-engine/current.json
+```
+
+- 같은 입력 hash의 진행 중 run은 재개한다.
+- 완료된 run 뒤 다른 입력 파일을 요청하면 새 run을 만든다.
+- 다른 입력의 진행 중 run이 있으면 `새 lifecycle로`를 명시해야 새 run을 만든다.
+- `loop-engine runs list`, `runs select --run-id <id>`, `runs lease`로 run을 조회·선택·잠글 수 있다.
 
 ## 전체 loop
 
@@ -27,6 +43,20 @@
 | `project-review` | 수용 기준 독립 판정 | review 또는 remediation packet |
 
 review가 현재 수용 기준 미달이면 `project-plan`으로만 돌아가 다시 수행한다. 모든 기준이 통과하면 `COMPLETE`다.
+
+### Init/Plan 품질 게이트
+
+`project-init`과 각 `project-plan` iteration은 입력 packet, 서로 다른 run ID를
+가진 세 개의 분석 artifact, judge requirement matrix를 hash-bound JSON artifact로
+기록해야 한다. judge는 material requirement의 unanimous weight / 전체 material
+weight로 consistency score를 계산한다. 50 미만 또는 security, privacy,
+irreversible effect, compliance, budget, core architecture의 모순은 차단한다.
+50–80은 모든 material difference를 해결한 Mediator artifact가 있어야 한다.
+
+`complete-init`은 bound charter/design/roadmap을, `complete-plan`은 현재
+iteration의 execution plan/validation matrix를 검증한다. 재계획은 이전 plan 및
+review hash와 non-deferrable 실패 정보를 포함하는 structured remediation packet이
+없으면 시작할 수 없다.
 
 ## 안전 경계
 
@@ -45,8 +75,9 @@ review가 현재 수용 기준 미달이면 `project-plan`으로만 돌아가 �
 대상 프로젝트에 다음 경로가 생성된다.
 
 ```text
-.loop-engine/state.json
-.loop-engine/artifacts/
+.loop-engine/runs/<run-id>/state.json
+.loop-engine/runs/<run-id>/artifacts/
+.loop-engine/current.json
 ```
 
 상태에는 입력 hash, evidence, checkpoint, block reason, remediation 정보가 기록된다. 산출물은 프로젝트 루트 기준 상대 경로로 evidence에 연결한다.
@@ -55,24 +86,32 @@ review가 현재 수용 기준 미달이면 `project-plan`으로만 돌아가 �
 
 ## CLI
 
-플러그인 루트의 `scripts/loopctl.py`는 상태 전이를 제공한다.
+로컬 editable install 뒤 `loop-engine`이 상태 전이를 제공한다. 플러그인 루트의
+`scripts/loopctl.py`는 같은 core를 호출하는 호환 래퍼다.
 
 ```bash
-PLUGIN_ROOT=/path/to/inno-loop-engineering/plugin/inno-loop-engineering
 PROJECT_ROOT=/path/to/project
 
+python3 -m pip install -e /path/to/inno-loop-engineering
+
 # intent.md 우선, intend.md 별칭 자동 탐색
-python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" init-auto
+loop-engine --project-root "$PROJECT_ROOT" init-auto
 
 # 명시 파일 입력
-python3 "$PLUGIN_ROOT/scripts/loopctl.py" \
-  --project-root "$PROJECT_ROOT" init --intent-file "$PROJECT_ROOT/intent.md"
+loop-engine --project-root "$PROJECT_ROOT" \
+  init --intent-file "asdf.md"
 
 # 상태 확인
-python3 "$PLUGIN_ROOT/scripts/loopctl.py" --project-root "$PROJECT_ROOT" status
+loop-engine --project-root "$PROJECT_ROOT" status
 ```
 
 CLI를 직접 쓸 때도 `plan`, `run`, `review`, `review-complete`, `replan`은 실제 evidence가 있을 때만 호출한다.
+품질 게이트는 `record-input-packet`, `run-quality-gate`, `complete-init`,
+`complete-plan`, `record-review-artifact`, `record-remediation-packet` 명령으로
+실행·검증한다. `run-quality-gate`는 caller가 제공한 local JSON runner를 shell 없이
+세 번 독립 실행하고, judge와 필요 시 Mediator artifact를 active run 아래에 저장한다.
+runner 오류·미가용·hash mismatch는 redacted evidence를 남기고 `BLOCKED`된다. 패키지는
+모델 endpoint나 외부 서비스를 내장 호출하지 않는다.
 
 ## 개발·검증
 

@@ -1,6 +1,6 @@
 {
   "name": "inno-loop-engineering",
-  "version": "0.1.0+codex.20260721151240",
+  "version": "0.1.0+codex.20260724140955",
   "description": "Four-loop autonomous project engineering with evidence and critical-only approval gates.",
   "author": {
     "name": "Local developer"
@@ -13,6 +13,6 @@
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Run the full Inno Loop Engineering lifecycle from intent.md, stopping only for approval-required risks."
+    "defaultPrompt": "Use Loop Engine to run the full lifecycle from intent.md, stopping only for approval-required risks. Natural Korean trigger: 'loop engine\uc73c\ub85c \uc218\ud589 \ubd80\ud0c1\ud574'."
   }
 }
