@@ -33,3 +33,6 @@ Thumbs.db
 *.tmp
 *.bak
 *~
+docs/
+.loop-engine/
+to-do-prompts/socratic-quality-gates/
