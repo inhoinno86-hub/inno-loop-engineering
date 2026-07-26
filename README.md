@@ -113,6 +113,34 @@ CLI를 직접 쓸 때도 `plan`, `run`, `review`, `review-complete`, `replan`은
 runner 오류·미가용·hash mismatch는 redacted evidence를 남기고 `BLOCKED`된다. 패키지는
 모델 endpoint나 외부 서비스를 내장 호출하지 않는다.
 
+### 자동 lifecycle supervisor와 host bridge
+
+`continue-until-terminal`은 init·plan·replan마다 host bridge를 **자동으로 다시
+호출**한다. 기본값은 설치된 Codex runtime을 호출하는 `loop-engine-host-bridge`이며,
+bridge는 한 번만 설정하면 lifecycle 전체에 재사용된다. 별도 host가 필요하면 아래처럼
+명시 command로 교체할 수 있다.
+
+```bash
+export LOOP_ENGINE_HOST_BRIDGE_COMMAND='your-codex-host-bridge --stdio'
+loop-engine --project-root "$PROJECT_ROOT" continue-until-terminal \
+  --integration-retries 2 --integration-retry-backoff-seconds 1
+
+# 실행 전 host configuration만 검사 (상태 변경 없음)
+loop-engine --project-root "$PROJECT_ROOT" preflight
+```
+
+명령행으로는 `--host-bridge-command`(기존 `--integration-adapter` 별칭)도 사용할 수
+있다. bridge는 stdin의 protocol v1 JSON을 받아 동일한 `protocol_version`과
+`request_id`, 순서가 고정된 `results`를 stdout으로 반환해야 한다. 요청에는 run,
+loop/iteration, attempt, artifact root, 현재 input-packet hash가 포함된다. 각 성공
+result는 활성 run 아래에 실제 artifact를 쓴 뒤 `name`, `status: "USED"`, `artifact`를
+반환한다. `FAILED`/`UNAVAILABLE`은 fail-closed로 기록된다. process/timeout/응답 검증
+실패만 제한 횟수로 재시도하며, bridge request/response receipt도 run artifact로 보존된다.
+
+Codex/Ouroboros/Superpowers의 MCP 권한은 Python child가 아니라 Codex host runtime에 있다.
+기본 bridge는 그 runtime에 실제 artifact 작성을 요청한다. runtime 자체가 없거나
+integration을 수행할 수 없으면 `FAILED`/`BLOCKED`되며, 정상 결과를 흉내 내는 fallback은 없다.
+
 선택적으로 `record-epistemic-ledger`는 현재 loop/iteration의 evidence-first
 claim ledger를 기록한다. ledger가 있는 plan은 해당 hash와 task별
 `precondition_claim_ids`, `effect_claims`, `failure_effects`를 bind해야 한다.

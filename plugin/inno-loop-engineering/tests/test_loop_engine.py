@@ -236,6 +236,7 @@ class LoopEngineTest(unittest.TestCase):
             state = core.initialize(Path(temp), "intent", full_lifecycle=True)
             directive = core.continuation_directive(state)
             self.assertEqual(directive["sequence"], ("project-init", "project-plan", "project-run", "project-review"))
+            self.assertEqual(directive["iteration"], 0)
             self.assertEqual(directive["user_output"], "forbidden")
             state["replan_count"] = 1; state["plan_iteration"] = 2; state["current_loop"] = "project-plan"
             directive = core.continuation_directive(state)
@@ -268,19 +269,82 @@ class LoopEngineTest(unittest.TestCase):
                     path = base / f'{name}.json'
                     path.write_text(json.dumps({'host_owned': True, 'name': name}))
                     results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
-                print(json.dumps(results))
+                print(json.dumps({'protocol_version': payload['protocol_version'], 'request_id': payload['request_id'], 'results': results}))
             """), encoding="utf-8")
             directive = core.continuation_directive(state)
             self.assertTrue(continuation_runner._run_integration_adapter(root, state, directive, f"{sys.executable} {adapter}"))
             self.assertTrue(continuation_runner._planning_integrations_ready(state))
             self.assertIsNone(state["outcome"])
 
-    def test_missing_host_owned_integration_adapter_blocks_without_cancellation_claim(self):
+    def test_host_bridge_protocol_includes_packet_and_writes_receipt(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
-            self.assertFalse(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), None))
-            self.assertEqual(state["block"]["reason"], "continuation_integration_adapter_required")
+            packet_ref, packet = self.packet(root, state, "project-init")
+            adapter = root / "adapter.py"
+            adapter.write_text(textwrap.dedent("""
+                import json
+                from pathlib import Path
+                payload = json.load(__import__('sys').stdin)
+                assert payload['protocol_version'] == 1
+                assert payload['input_packet']['artifact_ref'].endswith('input-packet.json')
+                assert payload['input_packet']['content_hash']
+                base = Path(payload['artifact_root']) / payload['loop'] / f\"iteration-{payload['iteration']}\"
+                base.mkdir(parents=True, exist_ok=True)
+                results = []
+                for name in payload['required_integrations']:
+                    path = base / f'{name}.json'; path.write_text('{}')
+                    results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
+                print(json.dumps({'protocol_version': 1, 'request_id': payload['request_id'], 'results': results}))
+            """), encoding="utf-8")
+            self.assertTrue(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), f"{sys.executable} {adapter}", retries=0))
+            receipt = core.artifacts_path(root, state['run_id']) / 'continuation' / 'bridge-project-init-0-0.json'
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(packet['artifact_ref'], packet_ref)
+
+    def test_host_bridge_retries_transient_failure_and_uses_environment_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            adapter = root / "adapter.py"; attempts = root / "attempts.txt"
+            adapter.write_text(textwrap.dedent("""
+                import json
+                from pathlib import Path
+                payload = json.load(__import__('sys').stdin)
+                counter = Path('attempts.txt')
+                count = int(counter.read_text() if counter.exists() else '0') + 1
+                counter.write_text(str(count))
+                if count == 1: raise SystemExit(1)
+                base = Path(payload['artifact_root']) / payload['loop'] / f\"iteration-{payload['iteration']}\"
+                base.mkdir(parents=True, exist_ok=True)
+                results = []
+                for name in payload['required_integrations']:
+                    path = base / f'{name}.json'; path.write_text('{}')
+                    results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
+                print(json.dumps({'protocol_version': 1, 'request_id': payload['request_id'], 'results': results}))
+            """), encoding="utf-8")
+            old = __import__('os').environ.get('LOOP_ENGINE_HOST_BRIDGE_COMMAND')
+            __import__('os').environ['LOOP_ENGINE_HOST_BRIDGE_COMMAND'] = f"{sys.executable} {adapter}"
+            try:
+                self.assertTrue(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), None, retries=1, retry_backoff_seconds=0))
+            finally:
+                if old is None: __import__('os').environ.pop('LOOP_ENGINE_HOST_BRIDGE_COMMAND', None)
+                else: __import__('os').environ['LOOP_ENGINE_HOST_BRIDGE_COMMAND'] = old
+            self.assertEqual(attempts.read_text(), '2')
+
+    def test_unavailable_host_bridge_blocks_without_cancellation_claim(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.assertFalse(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), "definitely-not-a-host-bridge", retries=0))
+            self.assertEqual(state["block"]["reason"], "continuation_integration_adapter_failed")
             self.assertNotIn("cancel", state["block"]["evidence"].lower())
+
+    def test_bridge_preflight_uses_the_default_host_bridge_and_skips_ready_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.assertTrue(continuation_runner.bridge_preflight(state, None)["ready"])
+            self.assertIn("loop_engine.host_bridge", continuation_runner._resolve_integration_adapter(None))
+            self.assertTrue(continuation_runner.bridge_preflight(state, "bridge --stdio")["ready"])
+            self.integrations(root, state, "project-init")
+            self.assertTrue(continuation_runner.bridge_preflight(state, None)["ready"])
 
     def test_resumed_integration_failure_starts_a_new_auditable_attempt(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -46,12 +46,18 @@ project-review`; every replan cycle is `project-plan → project-run →
 project-review`. Only a terminal directive may produce a user-facing response.
 
 `continue-until-terminal` may use a local Codex child for a stage, but that child
-has no authority to call required planning integrations. The parent runtime must
-provide `--integration-adapter <command>` when planning integration evidence is
-not already recorded. The adapter receives the loop/iteration request on stdin,
-writes one artifact per integration under the active run root, and emits ordered
-JSON results. Missing or failed adapters are `BLOCKED` as adapter failures; never
-label an MCP/runtime failure as a user cancellation.
+has no authority to call required planning integrations. Configure the parent once
+with `LOOP_ENGINE_HOST_BRIDGE_COMMAND` or `--host-bridge-command <command>` (legacy
+alias: `--integration-adapter`). The supervisor automatically invokes that bridge
+at every init/plan/replan where evidence is missing, with a versioned request that
+binds run, loop/iteration, input packet, and artifact root. The bridge writes one
+artifact per integration under the active run root and returns the ordered v1 JSON
+response; the supervisor stores a receipt and boundedly retries only transient
+transport/schema failures. Missing or failed adapters are `BLOCKED` as adapter
+failures; never label an MCP/runtime failure as a user cancellation.
+
+Before starting an unattended continuation, run `loop-engine ... preflight` to
+verify the same host-bridge configuration without mutating lifecycle state.
 
 1. **project-init** — Run Ouroboros `interview`, then Superpowers `brainstorming`, then `writing-plans` against validated intent and inspected project context. Save each output under `.loop-engine/artifacts/` and call `record-integration` once per tool with `--loop project-init --status USED --artifact <relative artifact ref>`; the CLI records its SHA-256. Create an immutable input packet with a canonical requirement matrix: stable ID, source reference, materiality, category, statement. The leader then dispatches three isolated read-only analysis agents (`requirements`, `risk`, `adversarial`) against the same complete matrix. Every agent assesses every canonical item; perspective-specific findings are supplemental evidence, not an alternate requirement scope. The leader writes each result as an artifact with a distinct agent/run identity and no sibling-output hashes. Dispatch a separate read-only judge only after all three hashes exist; it compares assessments per canonical ID. `implementation_contract_needed` becomes a plan obligation, while an unresolved human decision or contradiction follows the safety gate. Call `record-quality-gate` with those artifacts. Then write `charter.md`, `design.md`, `roadmap.md`, assumptions, success criteria, non-goals, and risk/approval policy. Then run `plan --evidence <charter/design/roadmap refs>`. If a required runtime agent or judge is unavailable or fails, record `UNAVAILABLE` or `FAILED`, report `BLOCKED`, and stop; never synthesize a fixture or normal-Codex fallback.
 2. **project-plan** — Run Ouroboros `interview`, then Superpowers `brainstorming`, then `writing-plans` against init artifacts or remediation packet. On replan, create new versioned artifacts; never reuse prior plan-iteration evidence. Save and record all three tool results with `--loop project-plan` before creating the current input packet. The leader repeats the same three isolated analysis-agent plus separate judge-agent adapter, records the accepted quality gate, then writes `execution-plan.md` and `validation-matrix.md`: ordered tasks, owner, dependencies, DoD, validation, rollback, and bounded budget. Then run `run --evidence <plan refs>`. Missing or failed integrations remain `BLOCKED` without fallback.

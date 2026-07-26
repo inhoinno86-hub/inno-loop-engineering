@@ -1208,7 +1208,10 @@ def continuation_directive(state: dict) -> dict:
     return {
         "action": "continue",
         "loop": current,
-        "iteration": state.get("plan_iteration"),
+        # project-init has its own fixed evidence scope.  Passing plan_iteration
+        # here made a fresh lifecycle advertise init iteration 1 while every core
+        # validator correctly expected project-init iteration 0.
+        "iteration": 0 if current == "project-init" else state.get("plan_iteration"),
         "cycle": "initial" if state.get("replan_count", 0) == 0 else "replan",
         "sequence": sequence,
         "user_output": "forbidden",
