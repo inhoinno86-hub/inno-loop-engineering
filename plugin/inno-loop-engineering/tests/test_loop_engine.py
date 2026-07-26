@@ -166,6 +166,60 @@ class LoopEngineTest(unittest.TestCase):
                 core.run_quality_gate(root, state, "project-init", "missing-quality-runner", "missing-quality-runner")
             self.assertEqual(state["outcome"], "BLOCKED")
 
+    def test_canonical_requirement_gate_treats_contract_findings_as_plan_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent")
+            canonical = [
+                {"id": "SAFE-1", "statement": "public only", "material": True, "category": "security", "source_refs": ["intent:1"]},
+                {"id": "EXEC-1", "statement": "define depth formula", "material": True, "category": "execution", "source_refs": ["intent:2"]},
+            ]
+            packet_ref = self.write(root, state, "project-init/iteration-0/input-packet.json", {"loop": "project-init", "iteration": 0, "input_hash": state["input_hash"], "source_artifacts": [], "repository_context": ["fixture"], "canonical_requirements": canonical})
+            packet = core.record_input_packet(root, state, "project-init", packet_ref)
+            refs = []
+            for number in range(3):
+                refs.append(self.write(root, state, f"project-init/iteration-0/analysis-canonical-{number}.json", {
+                    "tool": "fixture", "run_id": f"canonical-{number}", "invocation_id": f"invoke-{number}", "input_packet_hash": packet["content_hash"], "timestamp": "2026-07-26T00:00:00+00:00", "cited_input_hashes": [state["input_hash"]], "sibling_output_hashes": [],
+                    "requirements": [], "constraints": [], "non_goals": [], "risks": [], "acceptance_criteria": [], "ambiguities": [],
+                    "assessments": [{"requirement_id": "SAFE-1", "verdict": "confirmed", "evidence_refs": ["intent:1"]}, {"requirement_id": "EXEC-1", "verdict": "implementation_contract_needed", "evidence_refs": ["intent:2"]}],
+                }))
+            hashes = [core._json_artifact(root, state, ref)[1]["content_hash"] for ref in refs]
+            judge = self.write(root, state, "project-init/iteration-0/judge-canonical.json", {"tool": "fixture", "run_id": "judge-canonical", "invocation_id": "judge", "timestamp": "2026-07-26T00:00:00+00:00", "input_packet_hash": packet["content_hash"], "analysis_hashes": hashes, "consistency_score": 50, "material_contradictions": [], "requirement_matrix": [
+                {"id": "SAFE-1", "weight": 1, "classification": "unanimous", "material": True, "category": "security", "resolution": "confirmed", "evidence_refs": ["intent:1"]},
+                {"id": "EXEC-1", "weight": 1, "classification": "unique", "material": True, "category": "execution", "resolution": "implementation_contract_needed", "evidence_refs": ["intent:2"]},
+            ]})
+            gate = core.record_quality_gate(root, state, "project-init", refs, judge)
+            self.assertTrue(gate["accepted"])
+            self.assertIsNone(state["outcome"])
+
+    def test_epistemic_ledger_and_agent_health_are_local_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent")
+            source = self.write(root, state, "project-init/iteration-0/source.json", {"observed": True})
+            source_hash = core._json_artifact(root, state, source)[1]["content_hash"]
+            ledger = self.write(root, state, "project-init/iteration-0/ledger.json", {
+                "loop": "project-init", "iteration": 0, "claims": [{
+                    "claim_id": "fact-1", "statement": "local evidence exists", "classification": "known", "status": "active",
+                    "source_artifacts": [{"artifact_ref": source, "content_hash": source_hash}], "confidence": 1, "impact": "low",
+                    "owner": "coordinator", "resolution_method": "validation", "linked_task_ids": [], "linked_criterion_ids": [],
+                }],
+            })
+            record = core.record_epistemic_ledger(root, state, ledger)
+            self.assertEqual(record["claim_count"], 1)
+            core.save(root, state)
+            core.registry_add(root, "worker", None, 0, "bounded-task")
+            health = core.record_agent_health(root, "worker", "timeout", "lost heartbeat", max_attempts=1, required=True)
+            self.assertEqual(health["outcome"], "quarantined")
+            self.assertEqual(core.load(root)["outcome"], "BLOCKED")
+
+    def test_trajectory_retrieval_is_tag_bounded_and_non_authoritative(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent")
+            state["current_loop"] = "project-plan"
+            retrieval = core.retrieve_trajectories(root, state, ["epistemic"], 2)
+            self.assertTrue(retrieval["non_authoritative"])
+            self.assertEqual(retrieval["candidates"], [])
+            self.assertTrue(retrieval["artifact_ref"].startswith(f".loop-engine/runs/{state['run_id']}/artifacts/"))
+
     def test_legacy_migration_and_multiple_runs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); legacy = root / ".inno-loop" / "state.json"; legacy.parent.mkdir()
@@ -188,6 +242,16 @@ class LoopEngineTest(unittest.TestCase):
             self.assertEqual(directive["sequence"], ("project-plan", "project-run", "project-review"))
             state["outcome"] = "COMPLETE"
             self.assertEqual(core.continuation_directive(state)["user_output"], "required")
+
+    def test_continuation_prompt_uses_installed_cli_for_external_project(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "external-project"
+            root.mkdir()
+            state = core.initialize(root, "intent", full_lifecycle=True)
+            prompt = continuation_runner._prompt(root, core.continuation_directive(state))
+            self.assertIn(f"loop-engine --project-root {root}", prompt)
+            self.assertNotIn("plugin/inno-loop-engineering", prompt)
+            self.assertNotIn("skills/inno-loop/SKILL.md", prompt)
 
     def test_host_owned_integration_adapter_records_evidence_without_child_mcp(self):
         with tempfile.TemporaryDirectory() as temp:

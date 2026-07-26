@@ -24,8 +24,12 @@ APPROVAL_CATEGORIES = ("external_irreversible", "security_privacy_secrets", "bud
 MAX_INPUT_BYTES = 1_000_000
 DEFAULT_MAX_REPLANS = 3
 AGENT_STATUSES = ("active", "completed", "failed", "cancelled")
+AGENT_HEALTH_OUTCOMES = ("healthy", "timeout", "failed", "unavailable", "completed", "quarantined")
+CLAIM_CLASSIFICATIONS = ("known", "assumption", "known_unknown", "suspected_blind_spot")
+CLAIM_STATUSES = ("active", "resolved", "invalidated", "superseded")
 QUALITY_SECTIONS = ("requirements", "constraints", "non_goals", "risks", "acceptance_criteria", "ambiguities")
 MATERIAL_CATEGORIES = ("security", "privacy", "irreversible_effect", "compliance", "budget", "core_architecture")
+ASSESSMENT_VERDICTS = ("confirmed", "implementation_contract_needed", "human_decision_required", "contradictory")
 OUTPUT_FIELDS = ("goal", "scope", "requirements", "non_goals", "assumptions", "risks", "safety_approval_policy", "success_criteria", "open_decisions")
 RESULT_STATUSES = ("PASS", "FAIL", "BLOCKED", "INSUFFICIENT_EVIDENCE")
 RECEIPT_STATUSES = ("PASS", "FAIL", "UNAVAILABLE", "TIMEOUT")
@@ -187,6 +191,10 @@ def _normalize(state: dict) -> None:
     state.setdefault("run_report", None)
     state.setdefault("validation_receipts", [])
     state.setdefault("review_input", None)
+    state.setdefault("epistemic_ledgers", {})
+    state.setdefault("trajectory_summaries", [])
+    state.setdefault("trajectory_retrievals", [])
+    state.setdefault("agent_health", {})
     state.setdefault("continuation_policy", {"mode": "automatic", "user_output": "terminal-or-hil-only"})
     state.setdefault("alerts", [])
     state.setdefault("worktree_baseline", None)
@@ -227,7 +235,7 @@ def initialize(project_root: Path, intent: str, source_ref: str = "inline", full
     if max_replans < 1:
         raise PolicyError("max replans must be positive")
     record = _input_record(intent, source_ref)
-    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 4, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
+    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 4, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "epistemic_ledgers": {}, "trajectory_summaries": [], "trajectory_retrievals": [], "agent_health": {}, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
     save(root, state)
     _write_pointer(root, state["run_id"])
     return state
@@ -446,10 +454,99 @@ def record_input_packet(project_root: Path, state: dict, loop: str, artifact_ref
             expected.update({remediation["content_hash"], state["plan_revisions"][-1]["execution_plan"]["content_hash"], (state.get("review_artifact") or {}).get("content_hash")})
             if not expected.issubset(actual):
                 raise PolicyError("replan input packet omits remediation lineage hashes")
-    record = {**descriptor, "loop": loop, "iteration": iteration, "input_hash": packet["input_hash"]}
+    canonical = packet.get("canonical_requirements")
+    if canonical is not None:
+        if not isinstance(canonical, list) or not canonical:
+            raise PolicyError("canonical requirements must be a nonempty list")
+        ids = set()
+        for item in canonical:
+            if not isinstance(item, dict): raise PolicyError("invalid canonical requirement")
+            _fields(item, ("id", "statement", "material", "category", "source_refs"), "canonical requirement")
+            if not isinstance(item["id"], str) or not item["id"] or item["id"] in ids or not isinstance(item["statement"], str) or not item["statement"].strip() or not isinstance(item["material"], bool) or not isinstance(item["category"], str) or not isinstance(item["source_refs"], list) or not item["source_refs"]:
+                raise PolicyError("invalid canonical requirement fields")
+            ids.add(item["id"])
+    record = {**descriptor, "loop": loop, "iteration": iteration, "input_hash": packet["input_hash"], "canonical_requirement_ids": [item["id"] for item in canonical] if canonical else []}
     state["input_packets"][_packet_key(loop, iteration)] = record
     add_evidence(state, "input-packet", json.dumps(record, sort_keys=True))
     return record
+
+
+def _ledger_key(state: dict) -> str:
+    loop = state.get("current_loop")
+    if loop not in LOOPS:
+        raise PolicyError("unknown lifecycle loop")
+    return _packet_key(loop, 0 if loop == "project-init" else state["plan_iteration"])
+
+
+def _ledger_claims(root: Path, state: dict, key: str | None = None) -> dict[str, dict]:
+    record = state.get("epistemic_ledgers", {}).get(key or _ledger_key(state))
+    if not record:
+        return {}
+    value, descriptor = _json_artifact(root, state, record["artifact_ref"])
+    if descriptor["content_hash"] != record["content_hash"]:
+        raise PolicyError("epistemic ledger hash mismatch")
+    return {item["claim_id"]: item for item in value["claims"]}
+
+
+def record_epistemic_ledger(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    """Record an immutable, evidence-first claim ledger for the active loop."""
+    root = _validate_root(project_root); key = _ledger_key(state)
+    value, descriptor = _json_artifact(root, state, artifact_ref)
+    iteration = 0 if state["current_loop"] == "project-init" else state["plan_iteration"]
+    _fields(value, ("loop", "iteration", "claims"), "epistemic ledger")
+    if value["loop"] != state["current_loop"] or value["iteration"] != iteration or not isinstance(value["claims"], list):
+        raise PolicyError("epistemic ledger loop or iteration mismatch")
+    ids = set()
+    for claim in value["claims"]:
+        if not isinstance(claim, dict): raise PolicyError("invalid epistemic claim")
+        _fields(claim, ("claim_id", "statement", "classification", "status", "source_artifacts", "confidence", "impact", "owner", "resolution_method", "linked_task_ids", "linked_criterion_ids"), "epistemic claim")
+        if (not isinstance(claim["claim_id"], str) or not claim["claim_id"] or claim["claim_id"] in ids
+                or not isinstance(claim["statement"], str) or not claim["statement"].strip()
+                or claim["classification"] not in CLAIM_CLASSIFICATIONS or claim["status"] not in CLAIM_STATUSES
+                or not isinstance(claim["confidence"], (int, float)) or not 0 <= float(claim["confidence"]) <= 1
+                or claim["impact"] not in ("low", "medium", "high")
+                or not isinstance(claim["owner"], str) or not claim["owner"].strip()
+                or not isinstance(claim["resolution_method"], str) or not claim["resolution_method"].strip()
+                or not isinstance(claim["linked_task_ids"], list) or not isinstance(claim["linked_criterion_ids"], list)
+                or not all(isinstance(item, str) and item for item in claim["linked_task_ids"] + claim["linked_criterion_ids"])
+                or not isinstance(claim["source_artifacts"], list)):
+            raise PolicyError("invalid epistemic claim fields")
+        if claim["classification"] == "known" and claim["status"] == "active" and not claim["source_artifacts"]:
+            raise PolicyError("active known claim requires source evidence")
+        for source in claim["source_artifacts"]:
+            if not isinstance(source, dict): raise PolicyError("invalid claim source")
+            _fields(source, ("artifact_ref", "content_hash"), "claim source")
+            _, actual = _json_artifact(root, state, source["artifact_ref"])
+            if actual["content_hash"] != source["content_hash"]: raise PolicyError("claim source hash mismatch")
+        ids.add(claim["claim_id"])
+    record = {**descriptor, "loop": state["current_loop"], "iteration": iteration, "claim_count": len(value["claims"])}
+    state["epistemic_ledgers"][key] = record
+    add_evidence(state, "epistemic-ledger", json.dumps(record, sort_keys=True))
+    return record
+
+
+def _validate_plan_claim_contract(root: Path, state: dict, plan: dict, task_ids: set[str], criterion_ids: set[str]) -> None:
+    key = _packet_key("project-plan", state["plan_iteration"])
+    claims = _ledger_claims(root, state, key)
+    if not claims:
+        return
+    if plan.get("epistemic_ledger_hash") != state["epistemic_ledgers"][key]["content_hash"]:
+        raise PolicyError("execution plan epistemic ledger binding mismatch")
+    for claim in claims.values():
+        if claim["impact"] == "high" and claim["classification"] in ("known_unknown", "suspected_blind_spot") and claim["status"] == "active":
+            if not set(claim["linked_task_ids"]).issubset(task_ids) or not set(claim["linked_criterion_ids"]).issubset(criterion_ids) or not claim["linked_task_ids"] or not claim["linked_criterion_ids"]:
+                raise PolicyError("high-impact unknown must map to a plan task and criterion")
+    for task in plan["tasks"]:
+        _fields(task, ("precondition_claim_ids", "effect_claims", "failure_effects"), "epistemic task contract")
+        if not all(isinstance(item, str) and item in claims for item in task["precondition_claim_ids"]):
+            raise PolicyError("task precondition claim is unknown")
+        for claim_id in task["precondition_claim_ids"]:
+            claim = claims[claim_id]
+            if claim["status"] != "active" or claim["classification"] not in ("known", "assumption"):
+                raise PolicyError("task precondition is not satisfied")
+        for field in ("effect_claims", "failure_effects"):
+            if not isinstance(task[field], list) or not all(isinstance(item, str) and item in claims for item in task[field]):
+                raise PolicyError("task effect claim is unknown")
 
 
 def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_refs: list[str], judge_ref: str, mediator_ref: str | None = None) -> dict:
@@ -463,6 +560,9 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
         raise PolicyError("quality gate requires current input packet")
     if len(analysis_refs) != 3 or len(set(analysis_refs)) != 3:
         raise PolicyError("quality gate requires three distinct analyses")
+    packet_value, _ = _json_artifact(root, state, packet["artifact_ref"])
+    canonical = packet_value.get("canonical_requirements") or []
+    canonical_by_id = {item["id"]: item for item in canonical}
     analyses = []
     identities = set()
     for ref in analysis_refs:
@@ -476,6 +576,15 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
             raise PolicyError("analysis run identities must be distinct")
         if any(not isinstance(analysis[name], list) for name in QUALITY_SECTIONS):
             raise PolicyError("analysis sections must be lists")
+        if canonical:
+            assessments = analysis.get("assessments")
+            if not isinstance(assessments, list) or {item.get("requirement_id") for item in assessments if isinstance(item, dict)} != set(canonical_by_id):
+                raise PolicyError("analysis must assess every canonical requirement")
+            for item in assessments:
+                if not isinstance(item, dict): raise PolicyError("invalid requirement assessment")
+                _fields(item, ("requirement_id", "verdict", "evidence_refs"), "requirement assessment")
+                if item["verdict"] not in ASSESSMENT_VERDICTS or not isinstance(item["evidence_refs"], list):
+                    raise PolicyError("invalid requirement assessment verdict")
         identities.add(analysis["run_id"]); analyses.append({**descriptor, "run_id": analysis["run_id"], "tool": analysis["tool"]})
     judge, judge_descriptor = _json_artifact(root, state, judge_ref)
     _fields(judge, ("tool", "run_id", "invocation_id", "timestamp", "input_packet_hash", "analysis_hashes", "requirement_matrix", "consistency_score", "material_contradictions"), "judge")
@@ -484,12 +593,22 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
     matrix = judge["requirement_matrix"]
     if not isinstance(matrix, list) or not matrix:
         raise PolicyError("judge requirement matrix is required")
-    total = unanimous = 0.0; material_ids = set(); material_differences = set(); critical = set()
+    if canonical and {item.get("id") for item in matrix if isinstance(item, dict)} != set(canonical_by_id):
+        raise PolicyError("judge matrix must cover every canonical requirement")
+    total = unanimous = 0.0; material_ids = set(); material_differences = set(); critical = set(); human_decisions = set()
     for item in matrix:
         if not isinstance(item, dict): raise PolicyError("invalid requirement matrix entry")
         _fields(item, ("id", "weight", "classification", "material", "category"), "requirement matrix entry")
         if item["classification"] not in ("unanimous", "two-of-three", "unique", "contradictory") or not isinstance(item["weight"], (int, float)) or item["weight"] <= 0:
             raise PolicyError("invalid requirement matrix classification or weight")
+        if canonical:
+            source = canonical_by_id.get(item["id"])
+            if not source or item["material"] != source["material"] or item["category"] != source["category"]:
+                raise PolicyError("judge matrix must bind canonical requirements")
+            _fields(item, ("resolution", "evidence_refs"), "canonical requirement matrix entry")
+            if item["resolution"] not in ASSESSMENT_VERDICTS or not isinstance(item["evidence_refs"], list):
+                raise PolicyError("invalid canonical requirement resolution")
+            if item["resolution"] == "human_decision_required": human_decisions.add(item["id"])
         if item["material"]:
             material_ids.add(item["id"]); total += item["weight"]
             if item["classification"] == "unanimous": unanimous += item["weight"]
@@ -506,7 +625,7 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
         raise PolicyError("invalid material contradictions")
     critical.update(judge["material_contradictions"])
     mediator = None
-    if 50 <= score <= 80 and not critical:
+    if not canonical and 50 <= score <= 80 and not critical:
         if not mediator_ref:
             block(state, "quality_gate_mediator_required", True, judge_descriptor["artifact_ref"])
             raise PolicyError("mediator is required for 50..80 score")
@@ -518,10 +637,12 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
             block(state, "quality_gate_mediator_unresolved", True, descriptor["artifact_ref"])
             raise PolicyError("mediator did not resolve every material difference")
         mediator = descriptor
-    record = {"loop": loop, "iteration": iteration, "input_packet_hash": packet["content_hash"], "analyses": analyses, "judge": judge_descriptor, "mediator": mediator, "consistency_score": score, "material_contradictions": sorted(critical), "accepted": score > 80 and not critical or (50 <= score <= 80 and mediator is not None)}
+    semantic_ready = bool(canonical) and not critical and not human_decisions and all(item.get("resolution") != "contradictory" for item in matrix)
+    accepted = semantic_ready or (not canonical and (score > 80 and not critical or (50 <= score <= 80 and mediator is not None)))
+    record = {"loop": loop, "iteration": iteration, "input_packet_hash": packet["content_hash"], "analyses": analyses, "judge": judge_descriptor, "mediator": mediator, "consistency_score": score, "material_contradictions": sorted(critical), "human_decision_requirement_ids": sorted(human_decisions), "accepted": accepted}
     state["quality_gates"][_packet_key(loop, iteration)] = record
     add_evidence(state, "quality-gate", json.dumps(record, sort_keys=True))
-    if score < 50 or critical:
+    if (not canonical and score < 50) or critical or human_decisions:
         block(state, "quality_gate_unresolved", True, json.dumps(record, sort_keys=True))
     return record
 
@@ -579,7 +700,7 @@ def run_quality_gate(project_root: Path, state: dict, loop: str, analysis_runner
         for role in ("socratic-requirements", "socratic-risk", "socratic-adversarial"):
             run_id = str(uuid.uuid4())
             output = _runner_json(analysis_runner, {
-                "stage": "analysis", "role": role, "run_id": run_id,
+                "stage": "analysis", "role": role, "analysis_scope": "canonical_requirement_assessment", "run_id": run_id,
                 "input_packet": packet_value, "input_packet_hash": packet["content_hash"],
             })
             _fields(output, QUALITY_SECTIONS, "analysis runner output")
@@ -700,6 +821,7 @@ def complete_plan(project_root: Path, state: dict, packet_ref: str, plan_ref: st
         raise PolicyError("task dependency must reference an active plan task")
     if criterion_ids != mapped_criteria or not required_validation_ids.issubset(mapped_validations):
         raise PolicyError("plan omits criterion or required validation mapping")
+    _validate_plan_claim_contract(root, state, plan, task_ids, criterion_ids)
     revision = {"iteration": iteration, "input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "execution_plan": plan_descriptor, "validation_matrix": matrix_descriptor}
     state["plan_revisions"].append(revision)
     transition(state, "complete-plan", plan_descriptor["artifact_ref"])
@@ -1058,6 +1180,50 @@ def record_failure(state: dict, command: str, failure_class: str, failure_id: st
     return fingerprint
 
 
+def record_trajectory_summary(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    """Store a terminal/replan outcome summary as auditable, non-authoritative memory."""
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-review":
+        raise PolicyError("trajectory summary requires project review")
+    value, descriptor = _json_artifact(root, state, artifact_ref)
+    _fields(value, ("tags", "outcome", "plan_revision_hash", "review_artifact_hash", "non_authoritative"), "trajectory summary")
+    revision = _active_revision(state)
+    if (not isinstance(value["tags"], list) or not value["tags"] or not all(isinstance(item, str) and item for item in value["tags"])
+            or value["outcome"] not in ("COMPLETE", "REPLAN", "BLOCKED", "DEFERRED_BACKLOG")
+            or value["plan_revision_hash"] != revision["execution_plan"]["content_hash"]
+            or value["review_artifact_hash"] != (state.get("review_artifact") or {}).get("content_hash")
+            or value["non_authoritative"] is not True):
+        raise PolicyError("invalid trajectory summary")
+    record = {**descriptor, "tags": sorted(set(value["tags"])), "outcome": value["outcome"], "recorded_at": now(), "non_authoritative": True}
+    state["trajectory_summaries"].append(record)
+    add_evidence(state, "trajectory-summary", json.dumps(record, sort_keys=True))
+    return record
+
+
+def retrieve_trajectories(project_root: Path, state: dict, tags: list[str], limit: int = 5) -> dict:
+    """Retrieve deterministic tag matches; callers must treat output as planning hints only."""
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-plan" or not tags or limit < 1:
+        raise PolicyError("trajectory retrieval requires plan loop, tags, and positive limit")
+    wanted = set(tags); candidates = []
+    for path in (root / RUNS_RELATIVE).glob(f"*/{STATE_NAME}"):
+        try:
+            prior = json.loads(path.read_text(encoding="utf-8")); _normalize(prior)
+        except (OSError, json.JSONDecodeError, PolicyError):
+            continue
+        for summary in prior.get("trajectory_summaries", []):
+            matched = sorted(wanted & set(summary.get("tags", [])))
+            if matched:
+                candidates.append({"run_id": prior["run_id"], "artifact_ref": summary.get("artifact_ref"), "content_hash": summary.get("content_hash"), "matched_tags": matched, "score": len(matched), "outcome": summary.get("outcome")})
+    candidates.sort(key=lambda item: (-item["score"], item["run_id"], item["content_hash"] or ""))
+    result = {"tags": sorted(wanted), "limit": limit, "non_authoritative": True, "candidates": candidates[:limit], "recorded_at": now()}
+    ref = _artifact_write(root, state, f"project-plan/iteration-{state['plan_iteration']}/trajectory-retrieval.json", result)
+    record = {"artifact_ref": ref, "content_hash": hashlib.sha256((root / ref).read_bytes()).hexdigest(), **result}
+    state["trajectory_retrievals"].append(record)
+    add_evidence(state, "trajectory-retrieval", json.dumps(record, sort_keys=True))
+    return record
+
+
 def load_registry(project_root: Path) -> dict:
     root = _validate_root(project_root); _ensure_layout(root)
     run_id = _read_pointer(root)
@@ -1094,3 +1260,31 @@ def heartbeat_status(project_root: Path, timeout_seconds: int) -> dict:
     registry = load_registry(project_root); current = datetime.now(timezone.utc)
     stale = [a["agent_id"] for a in registry["agents"] if a["status"] == "active" and (current - datetime.fromisoformat(a["heartbeat_at"])).total_seconds() > timeout_seconds]
     return {"timeout_seconds": timeout_seconds, "stale_agent_ids": stale, "registry": registry}
+
+
+def record_agent_health(project_root: Path, agent_id: str, outcome: str, failure_id: str = "",
+                        max_attempts: int = 3, required: bool = False) -> dict:
+    """Record bounded current-run agent health; required failures remain fail-closed."""
+    if outcome not in AGENT_HEALTH_OUTCOMES or max_attempts < 1:
+        raise PolicyError("invalid agent health report")
+    root = _validate_root(project_root); state = load(root); registry = load_registry(root)
+    agent = next((item for item in registry["agents"] if item["agent_id"] == agent_id), None)
+    if not agent: raise PolicyError("agent health requires a registered agent")
+    prior = state["agent_health"].get(agent_id, {})
+    attempts = int(prior.get("attempts", 0)) + (1 if outcome in ("failed", "timeout", "unavailable") else 0)
+    fingerprint = hashlib.sha256(f"{agent_id}|{outcome}|{failure_id}".encode()).hexdigest() if failure_id else None
+    quarantined = outcome == "quarantined" or attempts >= max_attempts
+    record = {"agent_id": agent_id, "scope": agent["scope"], "outcome": "quarantined" if quarantined else outcome,
+              "attempts": attempts, "max_attempts": max_attempts, "failure_fingerprint": fingerprint,
+              "required": required, "recorded_at": now(), "heartbeat_at": agent["heartbeat_at"]}
+    state["agent_health"][agent_id] = record
+    add_evidence(state, "agent-health", json.dumps(record, sort_keys=True))
+    if required and record["outcome"] in ("timeout", "failed", "unavailable", "quarantined"):
+        block(state, "required_agent_unhealthy", False, json.dumps(record, sort_keys=True))
+    save(root, state)
+    return record
+
+
+def agent_health_status(project_root: Path) -> dict:
+    state = load(project_root)
+    return {"agent_health": state.get("agent_health", {}), "run_id": state["run_id"]}

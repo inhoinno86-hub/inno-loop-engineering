@@ -39,6 +39,9 @@ def main(argv=None):
     prompt_package=sub.add_parser("record-prompt-package"); prompt_package.add_argument("--artifact", required=True)
     run_report=sub.add_parser("record-run-report"); run_report.add_argument("--artifact", required=True)
     receipt=sub.add_parser("record-validation-receipt"); receipt.add_argument("--artifact", required=True)
+    ledger=sub.add_parser("record-epistemic-ledger"); ledger.add_argument("--artifact", required=True)
+    trajectory=sub.add_parser("record-trajectory-summary"); trajectory.add_argument("--artifact", required=True)
+    retrieve=sub.add_parser("retrieve-trajectories"); retrieve.add_argument("--tag", action="append", required=True); retrieve.add_argument("--limit", type=int, default=5)
     integ=sub.add_parser("record-integration"); integ.add_argument("--loop", required=True); integ.add_argument("--name", required=True); integ.add_argument("--status", required=True); integ.add_argument("--artifact"); integ.add_argument("--detail", default="")
     auth=sub.add_parser("authorize-lifecycle"); auth.add_argument("--evidence", required=True)
     resume=sub.add_parser("resume"); resume.add_argument("--evidence", required=True)
@@ -52,6 +55,7 @@ def main(argv=None):
     runs=sub.add_parser("runs"); runsub=runs.add_subparsers(dest="run_command", required=True); runsub.add_parser("list"); select=runsub.add_parser("select"); select.add_argument("--run-id", required=True); lease=runsub.add_parser("lease"); lease.add_argument("--holder", required=True); lease.add_argument("--timeout-seconds", type=int, default=300); release=runsub.add_parser("release-lease"); release.add_argument("--holder", required=True)
     registry=sub.add_parser("registry"); rsub=registry.add_subparsers(dest="registry_command", required=True); add=rsub.add_parser("add"); add.add_argument("--agent-id", required=True); add.add_argument("--parent-id"); add.add_argument("--depth", type=int, required=True); add.add_argument("--scope", required=True); update=rsub.add_parser("update"); update.add_argument("--agent-id", required=True); update.add_argument("--status", required=True); rsub.add_parser("list")
     heartbeat=sub.add_parser("heartbeat"); hsub=heartbeat.add_subparsers(dest="heartbeat_command", required=True); touch=hsub.add_parser("touch"); touch.add_argument("--agent-id", required=True); hstatus=hsub.add_parser("status"); hstatus.add_argument("--timeout-seconds", type=int, default=300)
+    health=sub.add_parser("health"); healthsub=health.add_subparsers(dest="health_command", required=True); report=healthsub.add_parser("report"); report.add_argument("--agent-id", required=True); report.add_argument("--outcome", required=True); report.add_argument("--failure-id", default=""); report.add_argument("--max-attempts", type=int, default=3); report.add_argument("--required", action="store_true"); healthsub.add_parser("status")
     args=parser.parse_args(argv); root=Path(args.project_root).resolve(); state = None
     try:
         if args.command in ("init", "init-auto"):
@@ -80,6 +84,7 @@ def main(argv=None):
         elif args.command == "registry":
             state = core.registry_add(root,args.agent_id,args.parent_id,args.depth,args.scope) if args.registry_command=="add" else core.registry_update(root,args.agent_id,args.status) if args.registry_command=="update" else core.load_registry(root)
         elif args.command == "heartbeat": state=core.heartbeat_touch(root,args.agent_id) if args.heartbeat_command=="touch" else core.heartbeat_status(root,args.timeout_seconds)
+        elif args.command == "health": state=core.record_agent_health(root,args.agent_id,args.outcome,args.failure_id,args.max_attempts,args.required) if args.health_command=="report" else core.agent_health_status(root)
         else:
             state=core.load(root)
             if args.command=="record-input-packet": core.record_input_packet(root,state,args.loop,args.artifact)
@@ -93,6 +98,9 @@ def main(argv=None):
             elif args.command=="record-prompt-package": core.record_prompt_package(root,state,args.artifact)
             elif args.command=="record-run-report": core.record_run_report(root,state,args.artifact)
             elif args.command=="record-validation-receipt": core.record_validation_receipt(root,state,args.artifact)
+            elif args.command=="record-epistemic-ledger": core.record_epistemic_ledger(root,state,args.artifact)
+            elif args.command=="record-trajectory-summary": core.record_trajectory_summary(root,state,args.artifact)
+            elif args.command=="retrieve-trajectories": core.retrieve_trajectories(root,state,args.tag,args.limit)
             elif args.command=="plan": core.transition(state,"complete-init",args.evidence)
             elif args.command=="run": core.transition(state,"complete-plan",args.evidence)
             elif args.command=="review": core.complete_run(root,state,args.run_report)

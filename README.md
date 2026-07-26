@@ -113,6 +113,14 @@ CLI를 직접 쓸 때도 `plan`, `run`, `review`, `review-complete`, `replan`은
 runner 오류·미가용·hash mismatch는 redacted evidence를 남기고 `BLOCKED`된다. 패키지는
 모델 endpoint나 외부 서비스를 내장 호출하지 않는다.
 
+선택적으로 `record-epistemic-ledger`는 현재 loop/iteration의 evidence-first
+claim ledger를 기록한다. ledger가 있는 plan은 해당 hash와 task별
+`precondition_claim_ids`, `effect_claims`, `failure_effects`를 bind해야 한다.
+`retrieve-trajectories --tag <tag>`는 이전 run의 local tag match를 planning
+hint로만 기록하며, retrieved data는 evidence·approval·quality gate를 만족할 수
+없다. `health report`는 registry agent의 timeout/failure/retry/quarantine를
+기록하고 required unhealthy agent를 fail-closed `BLOCKED`로 처리한다.
+
 ## 개발·검증
 
 ```bash

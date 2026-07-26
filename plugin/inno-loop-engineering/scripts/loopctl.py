@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for repository-owned ``loop-engine`` CLI."""
+"""Compatibility entry point for installed ``loop-engine`` CLI.
+
+Plugin caches contain skills and wrappers, not the repository's Python package.
+Delegate to the installed shared-core executable instead of importing from the
+cache-local ``loop_engine.py`` compatibility module.
+"""
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[3]
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from loop_engine.cli import main as cli_main
-    return cli_main()
+    try:
+        os.execvp("loop-engine", ["loop-engine", *sys.argv[1:]])
+    except FileNotFoundError:
+        print("loop-engine executable is required; install the shared core first", file=sys.stderr)
+        return 127
 
 
 if __name__ == "__main__":

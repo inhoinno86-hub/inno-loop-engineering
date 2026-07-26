@@ -11,17 +11,19 @@ from pathlib import Path
 from . import core
 
 
-def _prompt(directive: dict) -> str:
+def _prompt(root: Path, directive: dict) -> str:
+    controller = f"loop-engine --project-root {shlex.quote(str(root))}"
     return f"""You are the local Loop Engine continuation worker. Work only in the current
 repository and execute exactly the current lifecycle stage: {directive['loop']}.
-Read the active state with `python3 plugin/inno-loop-engineering/scripts/loopctl.py --project-root . status`
-and follow `plugin/inno-loop-engineering/skills/inno-loop/SKILL.md`. Required
-Ouroboros/Superpowers planning integrations are host-owned and are recorded before
-you run; do not invoke them yourself. Do not ask the
-user for routine approval or give progress reports. Persist every required artifact
-and transition. Stop your own work only after advancing the lifecycle, reaching a
-terminal/HIL BLOCKED state, or encountering a real safety gate. Do not commit, push,
-deploy, publish, or contact external services."""
+Read the active state with `{controller} status`. Use only the installed
+`loop-engine` CLI for lifecycle actions; this project is not expected to contain a
+plugin checkout or skill files. Required Ouroboros/Superpowers planning integrations
+are host-owned and recorded before you run; do not invoke them yourself. Do not ask
+the user for routine approval or give progress reports. Persist every required
+artifact and transition for {directive['loop']} iteration {directive['iteration']}.
+Stop your own work only after advancing the lifecycle, reaching a terminal/HIL
+BLOCKED state, or encountering a real safety gate. Do not commit, push, deploy,
+publish, or contact external services."""
 
 
 def _planning_integrations_ready(state: dict) -> bool:
@@ -124,7 +126,7 @@ def main(argv=None) -> int:
             state = core.load(root); directive = core.continuation_directive(state)
         output = core.artifacts_path(root, state["run_id"]) / "continuation" / f"attempt-{attempt}.md"
         output.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run([args.codex_bin, "exec", "-C", str(root), "--output-last-message", str(output), _prompt(directive)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run([args.codex_bin, "exec", "-C", str(root), "--output-last-message", str(output), _prompt(root, directive)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             detail = core.redact((result.stderr or result.stdout or "agent runtime failed")[-4000:])
             core.block(state, "continuation_agent_failed", False, detail); core.save(root, state)
