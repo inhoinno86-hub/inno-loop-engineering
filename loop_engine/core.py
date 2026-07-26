@@ -27,6 +27,9 @@ AGENT_STATUSES = ("active", "completed", "failed", "cancelled")
 QUALITY_SECTIONS = ("requirements", "constraints", "non_goals", "risks", "acceptance_criteria", "ambiguities")
 MATERIAL_CATEGORIES = ("security", "privacy", "irreversible_effect", "compliance", "budget", "core_architecture")
 OUTPUT_FIELDS = ("goal", "scope", "requirements", "non_goals", "assumptions", "risks", "safety_approval_policy", "success_criteria", "open_decisions")
+RESULT_STATUSES = ("PASS", "FAIL", "BLOCKED", "INSUFFICIENT_EVIDENCE")
+RECEIPT_STATUSES = ("PASS", "FAIL", "UNAVAILABLE", "TIMEOUT")
+TERMINAL_OUTCOMES = ("COMPLETE", "DEFERRED_BACKLOG", "BLOCKED")
 
 
 class PolicyError(ValueError):
@@ -164,6 +167,7 @@ def _normalize(state: dict) -> None:
             state["replan_history"] = [state["remediation_packet"]]
     state.setdefault("lifecycle_authorization", None)
     state.setdefault("integration_evidence", [])
+    state.setdefault("integration_attempts", {})
     state.setdefault("last_review_outcome", None)
     state.setdefault("replan_history", [])
     state.setdefault("replan_count", 0)
@@ -178,6 +182,16 @@ def _normalize(state: dict) -> None:
     state.setdefault("init_outputs", None)
     state.setdefault("plan_revisions", [])
     state.setdefault("review_artifact", None)
+    state.setdefault("execution_policy", None)
+    state.setdefault("prompt_package", None)
+    state.setdefault("run_report", None)
+    state.setdefault("validation_receipts", [])
+    state.setdefault("review_input", None)
+    state.setdefault("continuation_policy", {"mode": "automatic", "user_output": "terminal-or-hil-only"})
+    state.setdefault("alerts", [])
+    state.setdefault("worktree_baseline", None)
+    state.setdefault("replan_policy", {"mode": "bounded", "max_replans": state.get("max_replans", DEFAULT_MAX_REPLANS)})
+    state["artifact_version"] = max(int(state.get("artifact_version", 1)), 4)
 
 
 def load(project_root: Path) -> dict:
@@ -213,7 +227,7 @@ def initialize(project_root: Path, intent: str, source_ref: str = "inline", full
     if max_replans < 1:
         raise PolicyError("max replans must be positive")
     record = _input_record(intent, source_ref)
-    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 3, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
+    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 4, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
     save(root, state)
     _write_pointer(root, state["run_id"])
     return state
@@ -277,7 +291,71 @@ def add_evidence(state: dict, kind: str, value: str) -> None:
 def block(state: dict, reason: str, requires_human: bool, evidence: str) -> None:
     state["outcome"] = "BLOCKED"
     state["block"] = {"reason": reason, "requires_human": requires_human, "evidence": redact(evidence), "recorded_at": now()}
+    alert = {"alert_id": str(uuid.uuid4()), "kind": "hil-blocked" if requires_human else "terminal-blocked", "run_id": state.get("run_id"), "loop": state.get("current_loop"), "iteration": state.get("plan_iteration"), "reason": reason, "requires_human": requires_human, "evidence": redact(evidence), "created_at": now(), "delivery": "PENDING"}
+    state.setdefault("alerts", []).append(alert)
     add_evidence(state, "block", evidence)
+
+
+def pending_alerts(state: dict) -> list[dict]:
+    reconcile_alerts(state)
+    return [item for item in state.get("alerts", []) if item.get("delivery") == "PENDING"]
+
+
+def reconcile_alerts(state: dict) -> None:
+    """Backfill one alert for legacy BLOCKED states created before outbox support."""
+    blocked = state.get("block")
+    if state.get("outcome") != "BLOCKED" or not blocked:
+        # Migration path: old resumes predate automatic outbox resolution.
+        for event in state.get("verification_evidence", []):
+            if event.get("kind") != "resume":
+                continue
+            try:
+                resume = json.loads(event.get("value", ""))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            prior = {"reason": resume.get("blocked_reason"), "evidence": resume.get("blocked_evidence")}
+            if prior["reason"] and prior["evidence"]:
+                resolve_alerts_for_block(state, prior, "reconciled from validated project-owner resume")
+        return
+    if any(item.get("reason") == blocked.get("reason") and item.get("evidence") == blocked.get("evidence") for item in state.get("alerts", [])):
+        return
+    state.setdefault("alerts", []).append({"alert_id": str(uuid.uuid4()), "kind": "hil-blocked" if blocked.get("requires_human") else "terminal-blocked", "run_id": state.get("run_id"), "loop": state.get("current_loop"), "iteration": state.get("plan_iteration"), "reason": blocked.get("reason"), "requires_human": bool(blocked.get("requires_human")), "evidence": blocked.get("evidence"), "created_at": now(), "delivery": "PENDING", "backfilled": True})
+
+
+def acknowledge_alert(state: dict, alert_id: str, receipt: str) -> dict:
+    if not alert_id or not receipt:
+        raise PolicyError("alert id and delivery receipt are required")
+    for alert in state.get("alerts", []):
+        if alert["alert_id"] == alert_id:
+            if alert.get("delivery") != "PENDING":
+                raise PolicyError("alert already delivered")
+            alert.update({"delivery": "DELIVERED", "delivery_receipt": redact(receipt), "delivered_at": now()})
+            return alert
+    raise PolicyError("unknown alert")
+
+
+def resolve_alerts_for_block(state: dict, blocked: dict, resolution: str) -> int:
+    """Close alerts for the exact block that a validated resume supersedes."""
+    resolved = 0
+    for alert in state.get("alerts", []):
+        if (alert.get("delivery") == "PENDING" and alert.get("reason") == blocked.get("reason")
+                and alert.get("evidence") == blocked.get("evidence")):
+            alert.update({"delivery": "RESOLVED", "resolution": redact(resolution), "resolved_at": now()})
+            resolved += 1
+    return resolved
+
+
+def capture_worktree_baseline(project_root: Path, state: dict) -> dict:
+    root = _validate_root(project_root)
+    if state.get("worktree_baseline"):
+        return state["worktree_baseline"]
+    result = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise PolicyError("cannot capture worktree baseline")
+    paths = sorted(line[3:] for line in result.stdout.splitlines() if len(line) >= 4)
+    state["worktree_baseline"] = {"captured_at": now(), "paths": paths, "content_hash": hashlib.sha256("\n".join(paths).encode()).hexdigest()}
+    add_evidence(state, "worktree-baseline", json.dumps(state["worktree_baseline"], sort_keys=True))
+    return state["worktree_baseline"]
 
 
 def authorize_lifecycle(state: dict, evidence: str) -> None:
@@ -591,14 +669,165 @@ def complete_plan(project_root: Path, state: dict, packet_ref: str, plan_ref: st
         if value["input_packet_hash"] != packet["content_hash"] or value["quality_gate_hash"] != gate["judge"]["content_hash"] or value["plan_iteration"] != iteration:
             raise PolicyError(f"{label} binding mismatch")
     if not isinstance(plan.get("tasks"), list) or not plan["tasks"]: raise PolicyError("execution plan tasks are required")
+    if not isinstance(matrix.get("validations"), list) or not matrix["validations"] or not isinstance(matrix.get("criteria"), list) or not matrix["criteria"]:
+        raise PolicyError("validation matrix criteria and validations are required")
+    validation_ids = set(); required_validation_ids = set()
+    for validation in matrix["validations"]:
+        if not isinstance(validation, dict): raise PolicyError("invalid validation entry")
+        _fields(validation, ("validation_id", "required", "procedure"), "validation entry")
+        if not isinstance(validation["validation_id"], str) or not validation["validation_id"] or validation["validation_id"] in validation_ids or not isinstance(validation["required"], bool) or not isinstance(validation["procedure"], str) or not validation["procedure"].strip():
+            raise PolicyError("invalid validation id or required flag")
+        validation_ids.add(validation["validation_id"])
+        if validation["required"]: required_validation_ids.add(validation["validation_id"])
+    criterion_ids = set()
+    for criterion in matrix["criteria"]:
+        if not isinstance(criterion, dict): raise PolicyError("invalid criterion entry")
+        _fields(criterion, ("criterion_id", "weight", "mandatory", "critical", "validation_ids"), "criterion entry")
+        if not isinstance(criterion["criterion_id"], str) or not criterion["criterion_id"] or criterion["criterion_id"] in criterion_ids or not isinstance(criterion["weight"], (int, float)) or criterion["weight"] <= 0 or not isinstance(criterion["mandatory"], bool) or not isinstance(criterion["critical"], bool) or not isinstance(criterion["validation_ids"], list) or not criterion["validation_ids"] or not set(criterion["validation_ids"]).issubset(validation_ids):
+            raise PolicyError("invalid criterion mapping")
+        criterion_ids.add(criterion["criterion_id"])
+    task_ids = set(); mapped_criteria = set(); mapped_validations = set()
+    task_dependencies: dict[str, list[str]] = {}
+    expected_prior_revision = state["plan_revisions"][-1]["execution_plan"]["content_hash"] if state["plan_revisions"] else None
     for task in plan["tasks"]:
         if not isinstance(task, dict): raise PolicyError("invalid execution plan task")
-        _fields(task, ("scope", "owner", "dependencies", "definition_of_done", "validation", "rollback", "source_input_hash", "source_plan_revision_hash"), "execution plan task")
-        if task["source_input_hash"] != packet["content_hash"]: raise PolicyError("task input hash mismatch")
-    if not isinstance(matrix.get("validations"), list): raise PolicyError("validation matrix validations are required")
+        _fields(task, ("task_id", "scope", "owner", "dependencies", "definition_of_done", "validation", "rollback", "source_input_hash", "source_plan_revision_hash", "criterion_ids", "validation_ids"), "execution plan task")
+        if not isinstance(task["task_id"], str) or not task["task_id"] or task["task_id"] in task_ids or not all(isinstance(task[field], str) and task[field].strip() for field in ("scope", "owner", "definition_of_done", "validation", "rollback")) or not isinstance(task["dependencies"], list) or not all(isinstance(item, str) and item for item in task["dependencies"]) or task["task_id"] in task["dependencies"] or task["source_input_hash"] != packet["content_hash"] or task["source_plan_revision_hash"] != expected_prior_revision or not isinstance(task["criterion_ids"], list) or not task["criterion_ids"] or not set(task["criterion_ids"]).issubset(criterion_ids) or not isinstance(task["validation_ids"], list) or not task["validation_ids"] or not set(task["validation_ids"]).issubset(validation_ids):
+            raise PolicyError("invalid task mapping")
+        task_ids.add(task["task_id"]); task_dependencies[task["task_id"]] = task["dependencies"]
+        mapped_criteria.update(task["criterion_ids"]); mapped_validations.update(task["validation_ids"])
+    if any(not set(dependencies).issubset(task_ids) for dependencies in task_dependencies.values()):
+        raise PolicyError("task dependency must reference an active plan task")
+    if criterion_ids != mapped_criteria or not required_validation_ids.issubset(mapped_validations):
+        raise PolicyError("plan omits criterion or required validation mapping")
     revision = {"iteration": iteration, "input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "execution_plan": plan_descriptor, "validation_matrix": matrix_descriptor}
     state["plan_revisions"].append(revision)
     transition(state, "complete-plan", plan_descriptor["artifact_ref"])
+
+
+def _active_revision(state: dict) -> dict:
+    if not state.get("plan_revisions") or state["plan_revisions"][-1]["iteration"] != state.get("plan_iteration"):
+        raise PolicyError("current plan revision is required")
+    return state["plan_revisions"][-1]
+
+
+def _bound_artifact(root: Path, state: dict, artifact_ref: str, fields: tuple[str, ...], label: str) -> tuple[dict, dict, dict]:
+    value, descriptor = _json_artifact(root, state, artifact_ref)
+    revision = _active_revision(state)
+    _fields(value, ("plan_revision_hash", "validation_matrix_hash", *fields), label)
+    if value["plan_revision_hash"] != revision["execution_plan"]["content_hash"] or value["validation_matrix_hash"] != revision["validation_matrix"]["content_hash"]:
+        raise PolicyError(f"{label} plan binding mismatch")
+    return value, descriptor, revision
+
+
+def record_execution_policy(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-run": raise PolicyError("execution policy loop does not match current loop")
+    value, descriptor, _ = _bound_artifact(root, state, artifact_ref, ("superpowers_execution", "task_policies", "coordinator_id"), "execution policy")
+    if not isinstance(value["superpowers_execution"], bool) or not isinstance(value["task_policies"], list) or not isinstance(value["coordinator_id"], str) or not value["coordinator_id"]:
+        raise PolicyError("invalid execution policy")
+    plan, _ = _json_artifact(root, state, _active_revision(state)["execution_plan"]["artifact_ref"])
+    expected = {task["task_id"] for task in plan["tasks"]}
+    seen = set()
+    for policy in value["task_policies"]:
+        if not isinstance(policy, dict):
+            raise PolicyError("invalid task execution policy")
+        _fields(policy, ("task_id", "topology", "write_scope", "limits", "safety_constraints", "execution_mode", "rationale", "observed_result_refs"), "task execution policy")
+        task_id = policy["task_id"]
+        if (not isinstance(task_id, str) or task_id in seen or task_id not in expected
+                or not all(isinstance(policy[field], str) and policy[field].strip() for field in ("topology", "rationale"))
+                or not isinstance(policy["write_scope"], list) or not policy["write_scope"] or not all(isinstance(item, str) and item for item in policy["write_scope"])
+                or not isinstance(policy["limits"], dict) or not policy["limits"]
+                or not isinstance(policy["safety_constraints"], list) or not policy["safety_constraints"] or not all(isinstance(item, str) and item for item in policy["safety_constraints"])
+                or policy["execution_mode"] not in ("normal-codex", "superpowers")
+                or not isinstance(policy["observed_result_refs"], list) or not policy["observed_result_refs"] or not all(isinstance(item, str) and item for item in policy["observed_result_refs"])):
+            raise PolicyError("invalid task execution policy mapping")
+        if (policy["execution_mode"] == "superpowers") != value["superpowers_execution"]:
+            raise PolicyError("task execution mode does not match policy opt-in")
+        seen.add(task_id)
+    if seen != expected:
+        raise PolicyError("execution policy must map every active task exactly once")
+    state["execution_policy"] = descriptor; add_evidence(state, "execution-policy", json.dumps(descriptor, sort_keys=True)); return descriptor
+
+
+def record_prompt_package(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-run" or not state.get("execution_policy"): raise PolicyError("prompt package requires execution policy")
+    value, descriptor, _ = _bound_artifact(root, state, artifact_ref, ("execution_policy_hash", "steps"), "prompt package")
+    if value["execution_policy_hash"] != state["execution_policy"]["content_hash"] or not isinstance(value["steps"], list) or not value["steps"]:
+        raise PolicyError("invalid prompt package")
+    revision = _active_revision(state); plan, _ = _json_artifact(root, state, revision["execution_plan"]["artifact_ref"]); matrix, _ = _json_artifact(root, state, revision["validation_matrix"]["artifact_ref"])
+    task_ids = {item["task_id"] for item in plan["tasks"]}; criterion_ids = {item["criterion_id"] for item in matrix["criteria"]}; validation_ids = {item["validation_id"] for item in matrix["validations"]}; required_validation_ids = {item["validation_id"] for item in matrix["validations"] if item["required"]}
+    step_ids = set(); covered_tasks = set(); covered_criteria = set(); covered_validations = set()
+    for step in value["steps"]:
+        if not isinstance(step, dict): raise PolicyError("invalid prompt step")
+        _fields(step, ("step_id", "task_ids", "criterion_ids", "validation_ids", "completion_checks", "task_policy_ids"), "prompt step")
+        if not isinstance(step["step_id"], str) or not step["step_id"] or step["step_id"] in step_ids or not isinstance(step["task_ids"], list) or not step["task_ids"] or not all(isinstance(v, list) for v in (step["criterion_ids"], step["validation_ids"], step["completion_checks"], step["task_policy_ids"])) or set(step["task_ids"]) != set(step["task_policy_ids"]): raise PolicyError("invalid prompt step mapping")
+        if not set(step["task_ids"]).issubset(task_ids) or not set(step["criterion_ids"]).issubset(criterion_ids) or not set(step["validation_ids"]).issubset(validation_ids): raise PolicyError("unknown prompt step mapping")
+        step_ids.add(step["step_id"])
+        covered_tasks.update(step["task_ids"]); covered_criteria.update(step["criterion_ids"]); covered_validations.update(step["validation_ids"])
+    if covered_tasks != task_ids or covered_criteria != criterion_ids or not required_validation_ids.issubset(covered_validations): raise PolicyError("prompt package omits active plan coverage")
+    state["prompt_package"] = descriptor; add_evidence(state, "prompt-package", json.dumps(descriptor, sort_keys=True)); return descriptor
+
+
+def record_validation_receipt(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-run" or not state.get("prompt_package"): raise PolicyError("validation receipt requires prompt package")
+    value, descriptor, _ = _bound_artifact(root, state, artifact_ref, ("prompt_package_hash", "validation_id", "status", "command", "exit_code"), "validation receipt")
+    matrix, _ = _json_artifact(root, state, _active_revision(state)["validation_matrix"]["artifact_ref"])
+    revision = _active_revision(state)
+    state["validation_receipts"] = [
+        item for item in state["validation_receipts"]
+        if _json_artifact(root, state, item["artifact_ref"])[0].get("plan_revision_hash") == revision["execution_plan"]["content_hash"]
+    ]
+    known = {item["validation_id"] for item in matrix["validations"]}
+    if value["prompt_package_hash"] != state["prompt_package"]["content_hash"] or value["status"] not in RECEIPT_STATUSES or not isinstance(value["validation_id"], str) or value["validation_id"] not in known or not isinstance(value["command"], str) or not value["command"].strip() or not isinstance(value["exit_code"], int) or value["status"] == "PASS" and value["exit_code"] != 0: raise PolicyError("invalid validation receipt")
+    for field in ("executor_id", "invocation_id", "timestamp", "evidence_refs"):
+        if field not in value:
+            raise PolicyError("validation receipt provenance is required")
+        valid = isinstance(value[field], str) and bool(value[field].strip()) if field != "evidence_refs" else isinstance(value[field], list) and bool(value[field]) and all(isinstance(ref, str) and ref for ref in value[field])
+        if not valid:
+            raise PolicyError("invalid validation receipt provenance")
+    if any(item.get("validation_id") == value["validation_id"] for item in state["validation_receipts"]): raise PolicyError("validation receipt already recorded")
+    record = {**descriptor, "validation_id": value["validation_id"], "status": value["status"]}
+    state["validation_receipts"].append(record); add_evidence(state, "validation-receipt", json.dumps(record, sort_keys=True)); return record
+
+
+def record_run_report(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-run" or not state.get("prompt_package"): raise PolicyError("run report requires prompt package")
+    value, descriptor, _ = _bound_artifact(root, state, artifact_ref, ("prompt_package_hash", "task_results", "executor_ids", "changed_files"), "run report")
+    if value["prompt_package_hash"] != state["prompt_package"]["content_hash"] or not isinstance(value["task_results"], list) or not isinstance(value["executor_ids"], list) or not value["executor_ids"] or not all(isinstance(item, str) and item for item in value["executor_ids"]) or len(set(value["executor_ids"])) != len(value["executor_ids"]) or not isinstance(value["changed_files"], list) or not all(isinstance(item, str) and item for item in value["changed_files"]): raise PolicyError("invalid run report")
+    for result in value["task_results"]:
+        if not isinstance(result, dict) or set(result) != {"task_id", "status", "evidence_refs", "executor_id", "invocation_id", "timestamp"} or not isinstance(result["task_id"], str) or result["status"] not in RESULT_STATUSES or not isinstance(result["executor_id"], str) or result["executor_id"] not in value["executor_ids"] or not all(isinstance(result[field], str) and result[field].strip() for field in ("invocation_id", "timestamp")) or not isinstance(result["evidence_refs"], list) or not result["evidence_refs"] or not all(isinstance(ref, str) and ref for ref in result["evidence_refs"]):
+            raise PolicyError("invalid task result provenance")
+    if "execution_policy_hash" in value and value["execution_policy_hash"] != state["execution_policy"]["content_hash"]:
+        raise PolicyError("run report execution policy binding mismatch")
+    if "prompt_package_hashes" in value and value["prompt_package_hashes"] != [state["prompt_package"]["content_hash"]]:
+        raise PolicyError("run report prompt provenance mismatch")
+    state["run_report"] = descriptor; add_evidence(state, "run-report", json.dumps(descriptor, sort_keys=True)); return descriptor
+
+
+def complete_run(project_root: Path, state: dict, report_ref: str) -> None:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-run" or not state.get("run_report") or state["run_report"]["artifact_ref"] != report_ref: raise PolicyError("current run report is required")
+    report, _, revision = _bound_artifact(root, state, report_ref, ("prompt_package_hash", "task_results", "executor_ids", "changed_files"), "run report")
+    if not state.get("prompt_package") or report["prompt_package_hash"] != state["prompt_package"]["content_hash"]: raise PolicyError("run report prompt binding mismatch")
+    plan, _ = _json_artifact(root, state, revision["execution_plan"]["artifact_ref"])
+    task_results = report["task_results"]
+    if any(not isinstance(item, dict) or set(item) != {"task_id", "status", "evidence_refs", "executor_id", "invocation_id", "timestamp"} or not isinstance(item.get("task_id"), str) or item.get("status") not in RESULT_STATUSES or not isinstance(item.get("executor_id"), str) or item["executor_id"] not in report["executor_ids"] or not isinstance(item.get("evidence_refs"), list) or not item["evidence_refs"] or not all(isinstance(ref, str) and ref for ref in item["evidence_refs"]) or not all(isinstance(item.get(field), str) and item[field].strip() for field in ("invocation_id", "timestamp")) for item in task_results):
+        raise PolicyError("invalid task result")
+    result_ids = [item["task_id"] for item in task_results]
+    if len(result_ids) != len(set(result_ids)):
+        raise PolicyError("duplicate task result")
+    completed = {item["task_id"] for item in task_results if item["status"] == "PASS"}
+    required_tasks = {item["task_id"] for item in plan["tasks"]}
+    if set(result_ids) != required_tasks or not required_tasks.issubset(completed): raise PolicyError("run report omits completed plan tasks")
+    matrix, _ = _json_artifact(root, state, revision["validation_matrix"]["artifact_ref"])
+    required_validations = {item["validation_id"] for item in matrix["validations"] if item["required"]}
+    receipt_status = {item["validation_id"]: item["status"] for item in state["validation_receipts"]}
+    if any(receipt_status.get(item) != "PASS" for item in required_validations): raise PolicyError("run report omits passing required validation receipts")
+    state["current_loop"] = "project-review"; add_evidence(state, "complete-run", report_ref)
 
 
 def record_remediation_packet(project_root: Path, state: dict, artifact_ref: str) -> dict:
@@ -610,7 +839,7 @@ def record_remediation_packet(project_root: Path, state: dict, artifact_ref: str
     _fields(value, fields, "remediation packet")
     prior = state["plan_revisions"][-1]["execution_plan"]["content_hash"]
     review = (state.get("review_artifact") or {}).get("content_hash")
-    if not value["non_deferrable"] or value["prior_plan_revision_hash"] != prior or value["review_artifact_hash"] != review:
+    if not isinstance(value["failed_acceptance_criteria"], list) or not value["failed_acceptance_criteria"] or not isinstance(value["failure_evidence"], list) or not value["failure_evidence"] or not isinstance(value["plan_vs_actual"], list) or not value["plan_vs_actual"] or not all(isinstance(item, str) and item for item in value["failed_acceptance_criteria"] + value["failure_evidence"] + value["plan_vs_actual"]) or not isinstance(value["non_deferrable"], bool) or not value["non_deferrable"] or value["prior_plan_revision_hash"] != prior or value["review_artifact_hash"] != review:
         raise PolicyError("remediation packet lineage or non-deferrable status mismatch")
     return {**descriptor, "packet": value}
 
@@ -620,12 +849,56 @@ def record_review_artifact(project_root: Path, state: dict, artifact_ref: str) -
     if state.get("current_loop") != "project-review":
         raise PolicyError("review artifact loop does not match current loop")
     value, descriptor = _json_artifact(root, state, artifact_ref)
-    _fields(value, ("plan_revision_hash", "acceptance_results"), "review artifact")
-    if not state.get("plan_revisions") or value["plan_revision_hash"] != state["plan_revisions"][-1]["execution_plan"]["content_hash"]:
+    _fields(value, ("plan_revision_hash", "validation_matrix_hash", "prompt_package_hash", "run_report_hash", "acceptance_results", "reviewer_ids"), "review artifact")
+    revision = _active_revision(state)
+    if value["plan_revision_hash"] != revision["execution_plan"]["content_hash"] or value["validation_matrix_hash"] != revision["validation_matrix"]["content_hash"]:
         raise PolicyError("review artifact plan revision mismatch")
+    if not state.get("prompt_package") or value["prompt_package_hash"] != state["prompt_package"]["content_hash"] or not state.get("run_report") or value["run_report_hash"] != state["run_report"]["content_hash"]:
+        raise PolicyError("review artifact run lineage mismatch")
+    if not isinstance(value["acceptance_results"], list) or not isinstance(value["reviewer_ids"], list) or not value["reviewer_ids"]:
+        raise PolicyError("review artifact results and reviewers are required")
+    report, _ = _json_artifact(root, state, state["run_report"]["artifact_ref"])
+    if set(value["reviewer_ids"]) & set(report["executor_ids"]): raise PolicyError("reviewers must be independent from executors")
+    matrix, _ = _json_artifact(root, state, revision["validation_matrix"]["artifact_ref"])
+    expected = {item["criterion_id"] for item in matrix["criteria"]}
+    actual = set()
+    for result in value["acceptance_results"]:
+        if not isinstance(result, dict): raise PolicyError("invalid acceptance result")
+        _fields(result, ("criterion_id", "verdict", "evidence_refs", "confidence"), "acceptance result")
+        if result["criterion_id"] in actual or result["criterion_id"] not in expected or result["verdict"] not in RESULT_STATUSES or not isinstance(result["evidence_refs"], list) or not result["evidence_refs"] or not all(isinstance(ref, str) and ref for ref in result["evidence_refs"]) or not isinstance(result["confidence"], (int, float)) or not 0 <= float(result["confidence"]) <= 1: raise PolicyError("invalid acceptance result mapping")
+        actual.add(result["criterion_id"])
+    if actual != expected: raise PolicyError("review artifact omits criterion results")
     state["review_artifact"] = descriptor
     add_evidence(state, "review-artifact", json.dumps(descriptor, sort_keys=True))
     return descriptor
+
+
+def complete_review(project_root: Path, state: dict, artifact_ref: str) -> None:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-review" or not state.get("review_artifact") or state["review_artifact"]["artifact_ref"] != artifact_ref:
+        raise PolicyError("current review artifact is required")
+    review, _ = _json_artifact(root, state, artifact_ref); revision = _active_revision(state)
+    matrix, _ = _json_artifact(root, state, revision["validation_matrix"]["artifact_ref"])
+    verdicts = {item["criterion_id"]: item["verdict"] for item in review["acceptance_results"]}
+    mandatory = {item["criterion_id"] for item in matrix["criteria"] if item["mandatory"] or item["critical"]}
+    if any(verdicts[item] != "PASS" for item in mandatory): raise PolicyError("mandatory or critical review criteria are not all PASS")
+    required = {item["validation_id"] for item in matrix["validations"] if item["required"]}
+    receipt_status = {item["validation_id"]: item["status"] for item in state["validation_receipts"]}
+    if any(receipt_status.get(item) != "PASS" for item in required): raise PolicyError("required validations are not all PASS")
+    transition(state, "complete", artifact_ref)
+
+
+def defer(project_root: Path, state: dict, artifact_ref: str) -> None:
+    root = _validate_root(project_root)
+    if state.get("current_loop") != "project-review" or not state.get("review_artifact"): raise PolicyError("defer requires review artifact")
+    value, descriptor = _json_artifact(root, state, artifact_ref)
+    _fields(value, ("impact", "rationale", "owner", "revisit_trigger", "evidence_refs", "criterion_ids"), "backlog item")
+    matrix, _ = _json_artifact(root, state, _active_revision(state)["validation_matrix"]["artifact_ref"])
+    protected = {item["criterion_id"] for item in matrix["criteria"] if item["mandatory"] or item["critical"]}
+    reviewed = {item["criterion_id"]: item["verdict"] for item in _json_artifact(root, state, state["review_artifact"]["artifact_ref"])[0]["acceptance_results"]}
+    if not isinstance(value["criterion_ids"], list) or not value["criterion_ids"] or not set(value["criterion_ids"]).issubset(reviewed) or set(value["criterion_ids"]) & protected: raise PolicyError("mandatory or critical finding cannot be deferred")
+    if any(reviewed[item] == "PASS" for item in value["criterion_ids"]): raise PolicyError("passing finding cannot be deferred")
+    state["backlog"].append({**descriptor, "item": value}); state["outcome"] = "DEFERRED_BACKLOG"; add_evidence(state, "defer", descriptor["artifact_ref"])
 
 
 def record_integration(project_root: Path, state: dict, loop: str, name: str, status: str, artifact_ref: str | None = None, detail: str = "") -> None:
@@ -635,11 +908,12 @@ def record_integration(project_root: Path, state: dict, loop: str, name: str, st
     if name not in REQUIRED_INTEGRATIONS or status not in INTEGRATION_STATUSES:
         raise PolicyError("unknown integration name or status")
     iteration = 0 if loop == "project-init" else state["plan_iteration"]
-    prior = [r for r in state["integration_evidence"] if r["loop"] == loop and r["iteration"] == iteration]
+    attempt = _integration_attempt(state, loop, iteration)
+    prior = [r for r in state["integration_evidence"] if r["loop"] == loop and r["iteration"] == iteration and r.get("attempt", 0) == attempt]
     expected = REQUIRED_INTEGRATIONS[len(prior)] if len(prior) < len(REQUIRED_INTEGRATIONS) else None
     if status == "USED" and name != expected:
         raise PolicyError("integration evidence must use required order")
-    record = {"loop": loop, "iteration": iteration, "name": name, "status": status, "recorded_at": now()}
+    record = {"loop": loop, "iteration": iteration, "attempt": attempt, "name": name, "status": status, "recorded_at": now()}
     if status == "USED":
         path = _artifact(root, state["run_id"], artifact_ref or "")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -658,10 +932,29 @@ def record_integration(project_root: Path, state: dict, loop: str, name: str, st
 
 def _required_integrations(state: dict, loop: str) -> None:
     iteration = 0 if loop == "project-init" else state["plan_iteration"]
-    records = [r for r in state["integration_evidence"] if r["loop"] == loop and r["iteration"] == iteration]
+    attempt = _integration_attempt(state, loop, iteration)
+    records = [r for r in state["integration_evidence"] if r["loop"] == loop and r["iteration"] == iteration and r.get("attempt", 0) == attempt]
     if [r["name"] for r in records] != list(REQUIRED_INTEGRATIONS) or any(r["status"] != "USED" for r in records):
         block(state, "required_integrations_missing", False, f"{loop}:{iteration}")
         raise PolicyError("required ordered integration evidence missing")
+
+
+def _integration_attempt(state: dict, loop: str, iteration: int) -> int:
+    """Select the active, auditable attempt for one planning integration set."""
+    key = f"{loop}:{iteration}"
+    requested = state.get("integration_attempts", {}).get(key)
+    records = [r for r in state.get("integration_evidence", []) if r["loop"] == loop and r["iteration"] == iteration]
+    if requested is not None:
+        return int(requested)
+    attempts = [int(r.get("attempt", 0)) for r in records]
+    current = max(attempts, default=0)
+    current_records = [r for r in records if int(r.get("attempt", 0)) == current]
+    # A prior failed attempt can be retried only after `resume` cleared BLOCKED.
+    # The old evidence remains immutable and the retry is explicitly numbered.
+    if current_records and any(r["status"] != "USED" for r in current_records) and state.get("outcome") is None:
+        current += 1
+        state.setdefault("integration_attempts", {})[key] = current
+    return current
 
 
 def record_decision_a(state: dict, analysis_refs: list[str], score: float, score_ref: str, mediator_ref: str | None = None, resolved: bool = False) -> None:
@@ -678,8 +971,8 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
     if state.get("outcome") == "BLOCKED" and event != "resume":
         raise PolicyError("blocked state requires resume")
     current = state.get("current_loop")
-    if event in {"complete-init", "complete-plan", "complete-run"}:
-        expected = {"complete-init": ("project-init", "project-plan"), "complete-plan": ("project-plan", "project-run"), "complete-run": ("project-run", "project-review")}[event]
+    if event in {"complete-init", "complete-plan"}:
+        expected = {"complete-init": ("project-init", "project-plan"), "complete-plan": ("project-plan", "project-run")}[event]
         if current != expected[0]:
             raise PolicyError("illegal transition")
         if current == "project-init" and not state.get("init_outputs"):
@@ -692,12 +985,16 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
             block(state, "full_lifecycle_authorization_required", True, evidence)
             raise PolicyError("full lifecycle authorization required before project-run")
         state["current_loop"] = expected[1]; add_evidence(state, event, evidence); return
+    if event == "complete-run":
+        raise PolicyError("complete-run requires validated run report")
     if event == "complete":
         if current != "project-review": raise PolicyError("only review can complete")
+        if not state.get("review_artifact") or state["review_artifact"].get("artifact_ref") != evidence:
+            raise PolicyError("validated review artifact is required")
         state["outcome"] = "COMPLETE"; add_evidence(state, event, evidence); return
     if event == "replan":
         if current != "project-review": raise PolicyError("only review can replan")
-        if state["replan_count"] >= state["max_replans"]:
+        if state.get("replan_policy", {}).get("mode") != "owner-unlimited" and state["replan_count"] >= state["max_replans"]:
             block(state, "max_replans_exceeded", True, evidence); return
         packet = state.get("remediation_packet")
         if not packet or packet.get("artifact_ref") != evidence:
@@ -706,10 +1003,51 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
         packet = {**packet, "created_at": now(), "replan_count": state["replan_count"]}
         state["remediation_packet"] = packet; state["replan_history"].append(packet); state["current_loop"] = "project-plan"; add_evidence(state, "replan", evidence); return
     if event == "resume":
-        if state.get("outcome") != "BLOCKED" or (state.get("block") or {}).get("requires_human") and not evidence:
+        if state.get("outcome") != "BLOCKED" or not evidence:
             raise PolicyError("approval evidence required")
+        try:
+            approval = json.loads(evidence)
+        except json.JSONDecodeError as error:
+            raise PolicyError("resume requires structured project owner evidence") from error
+        _fields(approval, ("owner_id", "owner_role", "blocked_reason", "blocked_evidence", "decision", "remediation_status", "remediation_evidence_refs", "next_attempt_policy"), "resume evidence")
+        blocked = state.get("block") or {}
+        if approval["owner_role"] != "project-owner" or approval["decision"] != "resume" or approval["remediation_status"] not in ("resolved", "retry-authorized") or not isinstance(approval["remediation_evidence_refs"], list) or not approval["remediation_evidence_refs"] or not all(isinstance(item, str) and item for item in approval["remediation_evidence_refs"]) or not isinstance(approval["next_attempt_policy"], dict) or not all(isinstance(approval[name], str) and approval[name] for name in ("owner_id", "blocked_reason", "blocked_evidence")) or approval["blocked_reason"] != blocked.get("reason") or approval["blocked_evidence"] != blocked.get("evidence"):
+            raise PolicyError("resume ownership or blocked evidence mismatch")
+        if blocked.get("reason") == "max_replans_exceeded":
+            replacement = approval["next_attempt_policy"].get("replacement_max_replans")
+            if replacement == "unlimited": state["replan_policy"] = {"mode": "owner-unlimited", "authorized_by": approval["owner_id"], "authorized_at": now()}
+            elif isinstance(replacement, int) and replacement > state["replan_count"]:
+                state["max_replans"] = replacement; state["replan_policy"] = {"mode": "bounded", "max_replans": replacement}
+            else: raise PolicyError("max replan resume requires replacement bound")
+        resolve_alerts_for_block(state, blocked, "validated project-owner resume")
         state["outcome"] = None; state["block"] = None; add_evidence(state, event, evidence); return
     raise PolicyError("unknown event")
+
+
+def continuation_directive(state: dict) -> dict:
+    """Return the only permitted runtime directive for an automatic lifecycle.
+
+    The core cannot itself perform agent work; it makes the continuation and
+    user-output contract explicit for the runtime that owns those tools.
+    """
+    outcome = state.get("outcome")
+    if outcome in TERMINAL_OUTCOMES:
+        return {"action": "stop", "reason": outcome, "user_output": "required"}
+    current = state.get("current_loop")
+    if current not in LOOPS:
+        raise PolicyError("unknown lifecycle loop")
+    sequence = ("project-init", "project-plan", "project-run", "project-review") if state.get("replan_count", 0) == 0 else ("project-plan", "project-run", "project-review")
+    if current not in sequence:
+        raise PolicyError("current loop does not match lifecycle iteration")
+    return {
+        "action": "continue",
+        "loop": current,
+        "iteration": state.get("plan_iteration"),
+        "cycle": "initial" if state.get("replan_count", 0) == 0 else "replan",
+        "sequence": sequence,
+        "user_output": "forbidden",
+        "stop_only_for": ["COMPLETE", "DEFERRED_BACKLOG", "BLOCKED"],
+    }
 
 
 def record_failure(state: dict, command: str, failure_class: str, failure_id: str) -> str:
