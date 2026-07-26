@@ -238,6 +238,8 @@ def initialize(project_root: Path, intent: str, source_ref: str = "inline", full
         raise PolicyError("max replans must be positive")
     record = _input_record(intent, source_ref)
     state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 4, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "epistemic_ledgers": {}, "trajectory_summaries": [], "trajectory_retrievals": [], "agent_health": {}, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
+    snapshot = _artifact_write(root, state, "project-init/iteration-0/lifecycle-input.md", intent)
+    state["input"] = {**record, "artifact_ref": snapshot}
     save(root, state)
     _write_pointer(root, state["run_id"])
     return state

@@ -10,7 +10,6 @@ requires-python = ">=3.10"
 
 [project.scripts]
 loop-engine = "loop_engine.cli:main"
-loop-engine-host-bridge = "loop_engine.host_bridge:main"
 
 [tool.setuptools]
 packages = ["loop_engine"]

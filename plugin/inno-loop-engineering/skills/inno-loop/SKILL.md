@@ -45,16 +45,22 @@ initial cycle sequence is `project-init → project-plan → project-run →
 project-review`; every replan cycle is `project-plan → project-run →
 project-review`. Only a terminal directive may produce a user-facing response.
 
-`continue-until-terminal` may use a local Codex child for a stage, but that child
-has no authority to call required planning integrations. Configure the parent once
-with `LOOP_ENGINE_HOST_BRIDGE_COMMAND` or `--host-bridge-command <command>` (legacy
-alias: `--integration-adapter`). The supervisor automatically invokes that bridge
-at every init/plan/replan where evidence is missing, with a versioned request that
-binds run, loop/iteration, input packet, and artifact root. The bridge writes one
-artifact per integration under the active run root and returns the ordered v1 JSON
-response; the supervisor stores a receipt and boundedly retries only transient
-transport/schema failures. Missing or failed adapters are `BLOCKED` as adapter
-failures; never label an MCP/runtime failure as a user cancellation.
+`continue-until-terminal` may use a local Codex child for `project-run` and
+`project-review`, but that child has no authority to call required planning
+integrations. During this active `inno-loop` session, perform init/plan/replan
+Ouroboros and Superpowers integrations in the parent host, save their artifacts,
+and record them before starting the child stage. Do not launch a fresh `codex exec`
+for these conversational integrations: it does not inherit user answers, approval,
+or MCP session state.
+
+An unattended supervisor may use `LOOP_ENGINE_HOST_BRIDGE_COMMAND` or
+`--host-bridge-command <command>` (legacy alias: `--integration-adapter`) only for
+an adapter connected to an active parent host. It must pass a non-mutating protocol
+v2 `preflight` request, then receive versioned `integrate` requests with lifecycle
+input snapshot, authorization, init/plan/remediation lineage, packet when present,
+and artifact root. The adapter writes one artifact per integration and returns the
+ordered result set. Missing or failed adapters are `BLOCKED`; never label an
+MCP/runtime failure as a user cancellation.
 
 Before starting an unattended continuation, run `loop-engine ... preflight` to
 verify the same host-bridge configuration without mutating lifecycle state.

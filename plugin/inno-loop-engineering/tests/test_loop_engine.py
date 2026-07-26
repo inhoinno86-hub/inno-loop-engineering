@@ -262,6 +262,9 @@ class LoopEngineTest(unittest.TestCase):
                 import json
                 from pathlib import Path
                 payload = json.load(__import__('sys').stdin)
+                if payload['operation'] == 'preflight':
+                    print(json.dumps({'protocol_version': payload['protocol_version'], 'operation': 'preflight', 'request_id': payload['request_id'], 'ready': True}))
+                    raise SystemExit(0)
                 base = Path(payload['artifact_root']) / payload['loop'] / f\"iteration-{payload['iteration']}\"
                 base.mkdir(parents=True, exist_ok=True)
                 results = []
@@ -269,14 +272,14 @@ class LoopEngineTest(unittest.TestCase):
                     path = base / f'{name}.json'
                     path.write_text(json.dumps({'host_owned': True, 'name': name}))
                     results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
-                print(json.dumps({'protocol_version': payload['protocol_version'], 'request_id': payload['request_id'], 'results': results}))
+                print(json.dumps({'protocol_version': payload['protocol_version'], 'operation': 'integrate', 'request_id': payload['request_id'], 'results': results}))
             """), encoding="utf-8")
             directive = core.continuation_directive(state)
             self.assertTrue(continuation_runner._run_integration_adapter(root, state, directive, f"{sys.executable} {adapter}"))
             self.assertTrue(continuation_runner._planning_integrations_ready(state))
             self.assertIsNone(state["outcome"])
 
-    def test_host_bridge_protocol_includes_packet_and_writes_receipt(self):
+    def test_host_adapter_protocol_includes_snapshot_packet_and_writes_receipt(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
             packet_ref, packet = self.packet(root, state, "project-init")
@@ -285,7 +288,11 @@ class LoopEngineTest(unittest.TestCase):
                 import json
                 from pathlib import Path
                 payload = json.load(__import__('sys').stdin)
-                assert payload['protocol_version'] == 1
+                assert payload['protocol_version'] == 2
+                assert payload['operation'] == 'integrate'
+                assert payload['lifecycle_input']['artifact_ref'].endswith('lifecycle-input.md')
+                assert payload['lifecycle_input']['content_hash']
+                assert payload['lifecycle_authorization']['scope'] == 'full-lifecycle'
                 assert payload['input_packet']['artifact_ref'].endswith('input-packet.json')
                 assert payload['input_packet']['content_hash']
                 base = Path(payload['artifact_root']) / payload['loop'] / f\"iteration-{payload['iteration']}\"
@@ -294,7 +301,7 @@ class LoopEngineTest(unittest.TestCase):
                 for name in payload['required_integrations']:
                     path = base / f'{name}.json'; path.write_text('{}')
                     results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
-                print(json.dumps({'protocol_version': 1, 'request_id': payload['request_id'], 'results': results}))
+                print(json.dumps({'protocol_version': 2, 'operation': 'integrate', 'request_id': payload['request_id'], 'results': results}))
             """), encoding="utf-8")
             self.assertTrue(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), f"{sys.executable} {adapter}", retries=0))
             receipt = core.artifacts_path(root, state['run_id']) / 'continuation' / 'bridge-project-init-0-0.json'
@@ -309,6 +316,7 @@ class LoopEngineTest(unittest.TestCase):
                 import json
                 from pathlib import Path
                 payload = json.load(__import__('sys').stdin)
+                assert payload['operation'] == 'integrate'
                 counter = Path('attempts.txt')
                 count = int(counter.read_text() if counter.exists() else '0') + 1
                 counter.write_text(str(count))
@@ -319,7 +327,7 @@ class LoopEngineTest(unittest.TestCase):
                 for name in payload['required_integrations']:
                     path = base / f'{name}.json'; path.write_text('{}')
                     results.append({'name': name, 'status': 'USED', 'artifact': str(path)})
-                print(json.dumps({'protocol_version': 1, 'request_id': payload['request_id'], 'results': results}))
+                print(json.dumps({'protocol_version': 2, 'operation': 'integrate', 'request_id': payload['request_id'], 'results': results}))
             """), encoding="utf-8")
             old = __import__('os').environ.get('LOOP_ENGINE_HOST_BRIDGE_COMMAND')
             __import__('os').environ['LOOP_ENGINE_HOST_BRIDGE_COMMAND'] = f"{sys.executable} {adapter}"
@@ -337,14 +345,57 @@ class LoopEngineTest(unittest.TestCase):
             self.assertEqual(state["block"]["reason"], "continuation_integration_adapter_failed")
             self.assertNotIn("cancel", state["block"]["evidence"].lower())
 
-    def test_bridge_preflight_uses_the_default_host_bridge_and_skips_ready_evidence(self):
+    def test_missing_host_adapter_blocks_without_implicit_codex_fallback(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
-            self.assertTrue(continuation_runner.bridge_preflight(state, None)["ready"])
-            self.assertIn("loop_engine.host_bridge", continuation_runner._resolve_integration_adapter(None))
-            self.assertTrue(continuation_runner.bridge_preflight(state, "bridge --stdio")["ready"])
+            self.assertFalse(continuation_runner._run_integration_adapter(root, state, core.continuation_directive(state), None, retries=0))
+            self.assertEqual(state["block"]["reason"], "continuation_integration_adapter_required")
+
+    def test_preflight_requires_explicit_capable_parent_host_adapter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.assertIsNone(continuation_runner._resolve_integration_adapter(None))
+            self.assertFalse(continuation_runner.bridge_preflight(root, state, None)["ready"])
+            adapter = root / "adapter.py"
+            adapter.write_text(textwrap.dedent("""
+                import json
+                payload = json.load(__import__('sys').stdin)
+                assert payload['protocol_version'] == 2
+                assert payload['operation'] == 'preflight'
+                assert payload['interactive_parent_required'] is True
+                print(json.dumps({'protocol_version': 2, 'operation': 'preflight', 'request_id': payload['request_id'], 'ready': True}))
+            """), encoding="utf-8")
+            self.assertTrue(continuation_runner.bridge_preflight(root, state, f"{sys.executable} {adapter}")["ready"])
+            self.assertEqual(state["integration_evidence"], [])
             self.integrations(root, state, "project-init")
-            self.assertTrue(continuation_runner.bridge_preflight(state, None)["ready"])
+            self.assertTrue(continuation_runner.bridge_preflight(root, state, None)["ready"])
+
+    def test_preflight_rejects_non_capable_adapter_and_payload_carries_plan_lineage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            bad = root / "bad.py"
+            bad.write_text("import json; print(json.dumps({'ready': True}))", encoding="utf-8")
+            self.assertFalse(continuation_runner.bridge_preflight(root, state, f"{sys.executable} {bad}")["ready"])
+            self.complete_init(root, state)
+            directive = core.continuation_directive(state)
+            payload = continuation_runner._bridge_payload(root, state, directive, 0)
+            self.assertEqual(payload["operation"], "integrate")
+            self.assertEqual(payload["init_outputs"], state["init_outputs"])
+            self.assertIsNone(payload["remediation_packet"])
+
+    def test_unattended_runner_blocks_before_child_when_planning_host_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            core.initialize(root, "intent", full_lifecycle=True)
+            self.assertEqual(continuation_runner.main(["--project-root", str(root), "--codex-bin", "must-not-run"]), 2)
+            blocked = core.load(root)
+            self.assertEqual(blocked["block"]["reason"], "continuation_host_bridge_unavailable")
+
+    def test_nonplanning_stage_does_not_require_host_adapter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            state["current_loop"] = "project-run"
+            self.assertTrue(continuation_runner.bridge_preflight(root, state, None)["ready"])
 
     def test_resumed_integration_failure_starts_a_new_auditable_attempt(self):
         with tempfile.TemporaryDirectory() as temp:

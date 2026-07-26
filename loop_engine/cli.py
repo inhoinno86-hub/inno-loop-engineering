@@ -64,7 +64,7 @@ def main(argv=None):
         elif args.command == "status": state=core.load(root)
         elif args.command == "preflight":
             from .continuation_runner import bridge_preflight
-            state=bridge_preflight(core.load(root), args.host_bridge_command)
+            state=bridge_preflight(root, core.load(root), args.host_bridge_command)
         elif args.command == "continuation": state=core.continuation_directive(core.load(root))
         elif args.command == "capture-worktree-baseline":
             state=core.load(root); core.capture_worktree_baseline(root, state); core.save(root, state)

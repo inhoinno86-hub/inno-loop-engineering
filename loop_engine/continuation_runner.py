@@ -6,14 +6,13 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from . import core
 
 
-BRIDGE_PROTOCOL_VERSION = 1
+BRIDGE_PROTOCOL_VERSION = 2
 DEFAULT_INTEGRATION_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 
@@ -43,23 +42,62 @@ def _planning_integrations_ready(state: dict) -> bool:
     return [item["name"] for item in records] == list(core.REQUIRED_INTEGRATIONS) and all(item["status"] == "USED" for item in records)
 
 
-def bridge_preflight(state: dict, command: str | None) -> dict:
-    """Report the exact host prerequisite before a continuation is started."""
-    directive = core.continuation_directive(state)
-    required = directive["action"] == "continue" and directive["loop"] in ("project-init", "project-plan") and not _planning_integrations_ready(state)
-    resolved = _resolve_integration_adapter(command)
+def _bridge_lineage(state: dict) -> dict:
+    """Give a host the immutable input and prior lifecycle evidence it must inspect."""
     return {
-        "required": required,
-        "configured": bool(resolved),
-        "ready": not required or bool(resolved),
-        "protocol_version": BRIDGE_PROTOCOL_VERSION,
-        "configuration": "--host-bridge-command or LOOP_ENGINE_HOST_BRIDGE_COMMAND",
+        "lifecycle_input": state["input"],
+        "lifecycle_authorization": state.get("lifecycle_authorization"),
+        "init_outputs": state.get("init_outputs"),
+        "latest_plan_revision": state.get("plan_revisions", [])[-1] if state.get("plan_revisions") else None,
+        "remediation_packet": state.get("remediation_packet"),
     }
 
 
+def _bridge_preflight_payload(state: dict, directive: dict) -> dict:
+    return {
+        "protocol_version": BRIDGE_PROTOCOL_VERSION,
+        "operation": "preflight",
+        "request_id": f"{state['run_id']}:{directive['loop']}:{directive['iteration']}:preflight",
+        "run_id": state["run_id"], "loop": directive["loop"], "iteration": directive["iteration"],
+        "required_integrations": list(core.REQUIRED_INTEGRATIONS),
+        "interactive_parent_required": True,
+        **_bridge_lineage(state),
+    }
+
+
+def bridge_preflight(root: Path, state: dict, command: str | None) -> dict:
+    """Verify an explicit, non-mutating host-adapter capability response."""
+    directive = core.continuation_directive(state)
+    required = directive["action"] == "continue" and directive["loop"] in ("project-init", "project-plan") and not _planning_integrations_ready(state)
+    resolved = _resolve_integration_adapter(command)
+    result = {"required": required, "configured": bool(resolved), "ready": not required,
+              "protocol_version": BRIDGE_PROTOCOL_VERSION,
+              "configuration": "--host-bridge-command or LOOP_ENGINE_HOST_BRIDGE_COMMAND"}
+    if not required:
+        return result
+    if not resolved:
+        result["detail"] = "interactive planning requires an explicit parent-host adapter"
+        return result
+    payload = _bridge_preflight_payload(state, directive)
+    try:
+        completed = subprocess.run(shlex.split(resolved), cwd=root, input=json.dumps(payload), text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        if completed.returncode:
+            raise RuntimeError((completed.stderr or completed.stdout or "adapter returned nonzero")[-4000:])
+        response = json.loads(completed.stdout)
+        if (not isinstance(response, dict) or response.get("protocol_version") != BRIDGE_PROTOCOL_VERSION
+                or response.get("operation") != "preflight" or response.get("request_id") != payload["request_id"]
+                or response.get("ready") is not True):
+            raise ValueError("adapter preflight must return matching protocol, request_id, operation, and ready=true")
+        result["ready"] = True
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        result["detail"] = core.redact(str(error))
+    return result
+
+
 def _resolve_integration_adapter(command: str | None) -> str | None:
-    """Use an explicit command first, then the host supervisor configuration."""
-    return command or os.environ.get("LOOP_ENGINE_HOST_BRIDGE_COMMAND") or f"{shlex.quote(sys.executable)} -m loop_engine.host_bridge"
+    """Only an explicitly configured parent-host adapter may own integrations."""
+    return command or os.environ.get("LOOP_ENGINE_HOST_BRIDGE_COMMAND")
 
 
 def _bridge_payload(root: Path, state: dict, directive: dict, attempt: int) -> dict:
@@ -67,6 +105,7 @@ def _bridge_payload(root: Path, state: dict, directive: dict, attempt: int) -> d
     packet = state.get("input_packets", {}).get(key)
     return {
         "protocol_version": BRIDGE_PROTOCOL_VERSION,
+        "operation": "integrate",
         "request_id": f"{state['run_id']}:{directive['loop']}:{directive['iteration']}:{attempt}",
         "run_id": state["run_id"], "loop": directive["loop"],
         "iteration": directive["iteration"], "attempt": attempt,
@@ -75,6 +114,8 @@ def _bridge_payload(root: Path, state: dict, directive: dict, attempt: int) -> d
             "artifact_ref": packet["artifact_ref"], "content_hash": packet["content_hash"],
         },
         "required_integrations": list(core.REQUIRED_INTEGRATIONS),
+        "interactive_parent_required": True,
+        **_bridge_lineage(state),
     }
 
 
@@ -90,6 +131,8 @@ def _validate_bridge_response(payload: dict, value: object) -> list[dict]:
         raise ValueError("adapter response must be a versioned JSON object")
     if value.get("protocol_version") != BRIDGE_PROTOCOL_VERSION:
         raise ValueError("adapter protocol version mismatch")
+    if value.get("operation") != "integrate":
+        raise ValueError("adapter operation mismatch")
     if value.get("request_id") != payload["request_id"]:
         raise ValueError("adapter response request_id mismatch")
     values = value.get("results")
@@ -185,10 +228,10 @@ def main(argv=None) -> int:
         if directive["action"] == "stop":
             _deliver_alerts(root, state, args.alert_adapter); core.save(root, state)
             print(json.dumps(directive, sort_keys=True)); return 0
-        preflight = bridge_preflight(state, args.integration_adapter)
+        preflight = bridge_preflight(root, state, args.integration_adapter)
         if not preflight["ready"]:
-            core.block(state, "continuation_host_bridge_configuration_required", False,
-                       preflight["configuration"])
+            core.block(state, "continuation_host_bridge_unavailable", False,
+                       preflight.get("detail", preflight["configuration"]))
             _deliver_alerts(root, state, args.alert_adapter); core.save(root, state)
             print(json.dumps(core.continuation_directive(state), sort_keys=True)); return 2
         if directive["loop"] == "project-run":
