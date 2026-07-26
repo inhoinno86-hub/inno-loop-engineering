@@ -27,6 +27,8 @@ AGENT_STATUSES = ("active", "completed", "failed", "cancelled")
 AGENT_HEALTH_OUTCOMES = ("healthy", "timeout", "failed", "unavailable", "completed", "quarantined")
 CLAIM_CLASSIFICATIONS = ("known", "assumption", "known_unknown", "suspected_blind_spot")
 CLAIM_STATUSES = ("active", "resolved", "invalidated", "superseded")
+CLAIM_FRESHNESS = ("stable", "volatile", "expired")
+CLAIM_SOURCE_TYPES = ("primary_evidence", "validation_receipt", "llm_output", "retrieval", "self_report")
 QUALITY_SECTIONS = ("requirements", "constraints", "non_goals", "risks", "acceptance_criteria", "ambiguities")
 MATERIAL_CATEGORIES = ("security", "privacy", "irreversible_effect", "compliance", "budget", "core_architecture")
 ASSESSMENT_VERDICTS = ("confirmed", "implementation_contract_needed", "human_decision_required", "contradictory")
@@ -499,26 +501,36 @@ def record_epistemic_ledger(project_root: Path, state: dict, artifact_ref: str) 
     ids = set()
     for claim in value["claims"]:
         if not isinstance(claim, dict): raise PolicyError("invalid epistemic claim")
-        _fields(claim, ("claim_id", "statement", "classification", "status", "source_artifacts", "confidence", "impact", "owner", "resolution_method", "linked_task_ids", "linked_criterion_ids"), "epistemic claim")
+        _fields(claim, ("claim_id", "statement", "classification", "status", "source_artifacts", "confidence", "impact", "freshness", "timestamp", "owner", "resolution_method", "linked_task_ids", "linked_criterion_ids", "conflict_claim_ids"), "epistemic claim")
         if (not isinstance(claim["claim_id"], str) or not claim["claim_id"] or claim["claim_id"] in ids
                 or not isinstance(claim["statement"], str) or not claim["statement"].strip()
                 or claim["classification"] not in CLAIM_CLASSIFICATIONS or claim["status"] not in CLAIM_STATUSES
                 or not isinstance(claim["confidence"], (int, float)) or not 0 <= float(claim["confidence"]) <= 1
                 or claim["impact"] not in ("low", "medium", "high")
+                or claim["freshness"] not in CLAIM_FRESHNESS or not isinstance(claim["timestamp"], str) or not claim["timestamp"].strip()
                 or not isinstance(claim["owner"], str) or not claim["owner"].strip()
                 or not isinstance(claim["resolution_method"], str) or not claim["resolution_method"].strip()
                 or not isinstance(claim["linked_task_ids"], list) or not isinstance(claim["linked_criterion_ids"], list)
                 or not all(isinstance(item, str) and item for item in claim["linked_task_ids"] + claim["linked_criterion_ids"])
+                or not isinstance(claim["conflict_claim_ids"], list) or not all(isinstance(item, str) and item for item in claim["conflict_claim_ids"])
                 or not isinstance(claim["source_artifacts"], list)):
             raise PolicyError("invalid epistemic claim fields")
-        if claim["classification"] == "known" and claim["status"] == "active" and not claim["source_artifacts"]:
-            raise PolicyError("active known claim requires source evidence")
+        qualifying_source = False
         for source in claim["source_artifacts"]:
             if not isinstance(source, dict): raise PolicyError("invalid claim source")
-            _fields(source, ("artifact_ref", "content_hash"), "claim source")
+            _fields(source, ("artifact_ref", "content_hash", "source_type"), "claim source")
+            if source["source_type"] not in CLAIM_SOURCE_TYPES: raise PolicyError("invalid claim source type")
             _, actual = _json_artifact(root, state, source["artifact_ref"])
             if actual["content_hash"] != source["content_hash"]: raise PolicyError("claim source hash mismatch")
+            qualifying_source = qualifying_source or source["source_type"] in ("primary_evidence", "validation_receipt")
+        if claim["classification"] == "known" and claim["status"] == "active" and not qualifying_source:
+            raise PolicyError("active known claim requires primary or validation evidence")
         ids.add(claim["claim_id"])
+    by_id = {claim["claim_id"]: claim for claim in value["claims"]}
+    for claim in value["claims"]:
+        for conflict_id in claim["conflict_claim_ids"]:
+            if conflict_id == claim["claim_id"] or conflict_id not in by_id or by_id[conflict_id]["status"] != "active":
+                raise PolicyError("claim conflict must reference another active claim")
     record = {**descriptor, "loop": state["current_loop"], "iteration": iteration, "claim_count": len(value["claims"])}
     state["epistemic_ledgers"][key] = record
     add_evidence(state, "epistemic-ledger", json.dumps(record, sort_keys=True))
@@ -923,6 +935,17 @@ def record_run_report(project_root: Path, state: dict, artifact_ref: str) -> dic
     for result in value["task_results"]:
         if not isinstance(result, dict) or set(result) != {"task_id", "status", "evidence_refs", "executor_id", "invocation_id", "timestamp"} or not isinstance(result["task_id"], str) or result["status"] not in RESULT_STATUSES or not isinstance(result["executor_id"], str) or result["executor_id"] not in value["executor_ids"] or not all(isinstance(result[field], str) and result[field].strip() for field in ("invocation_id", "timestamp")) or not isinstance(result["evidence_refs"], list) or not result["evidence_refs"] or not all(isinstance(ref, str) and ref for ref in result["evidence_refs"]):
             raise PolicyError("invalid task result provenance")
+    claims = _ledger_claims(root, state, _packet_key("project-plan", state["plan_iteration"]))
+    if claims:
+        plan, _ = _json_artifact(root, state, _active_revision(state)["execution_plan"]["artifact_ref"])
+        task_by_id = {task["task_id"]: task for task in plan["tasks"]}
+        for result in value["task_results"]:
+            if result["status"] != "PASS":
+                continue
+            for claim_id in task_by_id[result["task_id"]]["precondition_claim_ids"]:
+                claim = claims[claim_id]
+                if claim["status"] != "active" or claim["freshness"] == "expired" or claim["classification"] not in ("known", "assumption"):
+                    raise PolicyError("passing task has unsatisfied epistemic precondition")
     if "execution_policy_hash" in value and value["execution_policy_hash"] != state["execution_policy"]["content_hash"]:
         raise PolicyError("run report execution policy binding mismatch")
     if "prompt_package_hashes" in value and value["prompt_package_hashes"] != [state["prompt_package"]["content_hash"]]:
@@ -949,6 +972,23 @@ def complete_run(project_root: Path, state: dict, report_ref: str) -> None:
     required_validations = {item["validation_id"] for item in matrix["validations"] if item["required"]}
     receipt_status = {item["validation_id"]: item["status"] for item in state["validation_receipts"]}
     if any(receipt_status.get(item) != "PASS" for item in required_validations): raise PolicyError("run report omits passing required validation receipts")
+    plan_ledger_key = _packet_key("project-plan", state["plan_iteration"])
+    claims = _ledger_claims(root, state, plan_ledger_key)
+    if claims:
+        prior, _ = _json_artifact(root, state, state["epistemic_ledgers"][plan_ledger_key]["artifact_ref"])
+        results = {item["task_id"]: item["status"] for item in task_results}
+        receipt_sources = [{"artifact_ref": item["artifact_ref"], "content_hash": item["content_hash"], "source_type": "validation_receipt"} for item in state["validation_receipts"] if item["status"] == "PASS"]
+        revised = []
+        for claim in prior["claims"]:
+            updated = dict(claim)
+            for task in plan["tasks"]:
+                if results[task["task_id"]] == "PASS" and claim["claim_id"] in task["effect_claims"]:
+                    updated["status"] = "resolved"; updated["source_artifacts"] = [*updated["source_artifacts"], *receipt_sources]
+                if results[task["task_id"]] != "PASS" and claim["claim_id"] in task["failure_effects"]:
+                    updated["status"] = "invalidated"
+            updated["timestamp"] = now(); revised.append(updated)
+        ref = _artifact_write(root, state, f"project-run/iteration-{state['plan_iteration']}/epistemic-ledger.json", {"loop": "project-run", "iteration": state["plan_iteration"], "claims": revised})
+        record_epistemic_ledger(root, state, ref)
     state["current_loop"] = "project-review"; add_evidence(state, "complete-run", report_ref)
 
 
@@ -1113,6 +1153,8 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
         if current != "project-review": raise PolicyError("only review can complete")
         if not state.get("review_artifact") or state["review_artifact"].get("artifact_ref") != evidence:
             raise PolicyError("validated review artifact is required")
+        if state.get("epistemic_ledgers") and not any(item.get("outcome") == "COMPLETE" and item.get("review_artifact_hash") == state["review_artifact"]["content_hash"] for item in state.get("trajectory_summaries", [])):
+            raise PolicyError("ledger-enabled completion requires trajectory summary")
         state["outcome"] = "COMPLETE"; add_evidence(state, event, evidence); return
     if event == "replan":
         if current != "project-review": raise PolicyError("only review can replan")
@@ -1121,6 +1163,8 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
         packet = state.get("remediation_packet")
         if not packet or packet.get("artifact_ref") != evidence:
             raise PolicyError("structured remediation packet is required")
+        if state.get("epistemic_ledgers") and not any(item.get("outcome") == "REPLAN" and item.get("review_artifact_hash") == state.get("review_artifact", {}).get("content_hash") for item in state.get("trajectory_summaries", [])):
+            raise PolicyError("ledger-enabled replan requires trajectory summary")
         state["replan_count"] += 1; state["plan_iteration"] += 1; state["last_review_outcome"] = "REPLAN"
         packet = {**packet, "created_at": now(), "replan_count": state["replan_count"]}
         state["remediation_packet"] = packet; state["replan_history"].append(packet); state["current_loop"] = "project-plan"; add_evidence(state, "replan", evidence); return
@@ -1186,12 +1230,16 @@ def record_trajectory_summary(project_root: Path, state: dict, artifact_ref: str
     if state.get("current_loop") != "project-review":
         raise PolicyError("trajectory summary requires project review")
     value, descriptor = _json_artifact(root, state, artifact_ref)
-    _fields(value, ("tags", "outcome", "plan_revision_hash", "review_artifact_hash", "non_authoritative"), "trajectory summary")
+    _fields(value, ("tags", "outcome", "input_packet_hash", "plan_revision_hash", "review_artifact_hash", "ledger_hash", "claim_classifications", "preconditions", "action_refs", "validation_refs", "failure_class", "remediation", "quality_signal", "non_authoritative"), "trajectory summary")
     revision = _active_revision(state)
     if (not isinstance(value["tags"], list) or not value["tags"] or not all(isinstance(item, str) and item for item in value["tags"])
             or value["outcome"] not in ("COMPLETE", "REPLAN", "BLOCKED", "DEFERRED_BACKLOG")
+            or value["input_packet_hash"] != revision["input_packet_hash"]
             or value["plan_revision_hash"] != revision["execution_plan"]["content_hash"]
             or value["review_artifact_hash"] != (state.get("review_artifact") or {}).get("content_hash")
+            or not all(isinstance(value[field], list) for field in ("claim_classifications", "preconditions", "action_refs", "validation_refs"))
+            or not isinstance(value["failure_class"], str) or not isinstance(value["remediation"], str)
+            or not isinstance(value["quality_signal"], (int, float)) or not 0 <= value["quality_signal"] <= 1
             or value["non_authoritative"] is not True):
         raise PolicyError("invalid trajectory summary")
     record = {**descriptor, "tags": sorted(set(value["tags"])), "outcome": value["outcome"], "recorded_at": now(), "non_authoritative": True}
@@ -1288,3 +1336,18 @@ def record_agent_health(project_root: Path, agent_id: str, outcome: str, failure
 def agent_health_status(project_root: Path) -> dict:
     state = load(project_root)
     return {"agent_health": state.get("agent_health", {}), "run_id": state["run_id"]}
+
+
+def reconcile_agent_health(project_root: Path, timeout_seconds: int = 300) -> dict:
+    root = _validate_root(project_root); state = load(root); registry = load_registry(root)
+    current = datetime.now(timezone.utc); reconciled = []
+    for agent in registry["agents"]:
+        if agent["status"] != "active" or (current - datetime.fromisoformat(agent["heartbeat_at"])).total_seconds() <= timeout_seconds:
+            continue
+        prior = state["agent_health"].get(agent["agent_id"], {})
+        record = {"agent_id": agent["agent_id"], "scope": agent["scope"], "outcome": "timeout", "attempts": int(prior.get("attempts", 0)) + 1, "max_attempts": int(prior.get("max_attempts", 3)), "failure_fingerprint": hashlib.sha256(f"{agent['agent_id']}|stale".encode()).hexdigest(), "required": bool(prior.get("required", False)), "recorded_at": now(), "heartbeat_at": agent["heartbeat_at"], "quarantine_reason": "stale_heartbeat"}
+        if record["attempts"] >= record["max_attempts"]: record["outcome"] = "quarantined"
+        state["agent_health"][agent["agent_id"]] = record; reconciled.append(record)
+        if record["required"]: block(state, "required_agent_unhealthy", False, json.dumps(record, sort_keys=True))
+    if reconciled: save(root, state)
+    return {"timeout_seconds": timeout_seconds, "reconciled": reconciled}

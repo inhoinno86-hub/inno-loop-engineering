@@ -27,8 +27,12 @@ hash; they remain audit-only.
 An Epistemic Ledger is an optional, hash-bound artifact scoped to the current
 loop/iteration. It records `known`, `assumption`, `known_unknown`, and
 `suspected_blind_spot` claims with evidence provenance, impact, owner, status,
-and task/criterion links. Active `known` claims require hash-verified source
-artifacts. When a plan has a current ledger, its execution plan binds the ledger
+task/criterion links. Claims also record timestamp, freshness (`stable`,
+`volatile`, or `expired`) and links to conflicting active claims. Every source
+declares whether it is primary evidence, a validation receipt, LLM output,
+retrieval, or self-report. Active `known` claims require hash-verified primary
+evidence or validation-receipt sources; LLM/retrieval/self-report alone is not
+enough. When a plan has a current ledger, its execution plan binds the ledger
 hash and every task declares precondition, success-effect, and failure-effect
 claim IDs; high-impact active unknowns must map to both a task and criterion.
 

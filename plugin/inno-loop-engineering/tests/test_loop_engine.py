@@ -199,8 +199,8 @@ class LoopEngineTest(unittest.TestCase):
             ledger = self.write(root, state, "project-init/iteration-0/ledger.json", {
                 "loop": "project-init", "iteration": 0, "claims": [{
                     "claim_id": "fact-1", "statement": "local evidence exists", "classification": "known", "status": "active",
-                    "source_artifacts": [{"artifact_ref": source, "content_hash": source_hash}], "confidence": 1, "impact": "low",
-                    "owner": "coordinator", "resolution_method": "validation", "linked_task_ids": [], "linked_criterion_ids": [],
+                    "source_artifacts": [{"artifact_ref": source, "content_hash": source_hash, "source_type": "primary_evidence"}], "confidence": 1, "impact": "low", "freshness": "stable", "timestamp": "2026-07-26T00:00:00Z",
+                    "owner": "coordinator", "resolution_method": "validation", "linked_task_ids": [], "linked_criterion_ids": [], "conflict_claim_ids": [],
                 }],
             })
             record = core.record_epistemic_ledger(root, state, ledger)
