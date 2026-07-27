@@ -42,6 +42,9 @@ def main(argv=None):
     submission=sub.add_parser("record-stage-submission"); submission.add_argument("--artifact", required=True)
     ledger=sub.add_parser("record-epistemic-ledger"); ledger.add_argument("--artifact", required=True)
     trajectory=sub.add_parser("record-trajectory-summary"); trajectory.add_argument("--artifact", required=True)
+    context=sub.add_parser("artifact-context"); context.add_argument("--artifact-type", required=True)
+    bound=sub.add_parser("write-bound-artifact"); bound.add_argument("--artifact-type", required=True); bound.add_argument("--payload", required=True); bound.add_argument("--output-name", required=True)
+    validate=sub.add_parser("validate-stage-artifacts"); validate.add_argument("--artifact", action="append", required=True, help="key=project-relative artifact ref")
     retrieve=sub.add_parser("retrieve-trajectories"); retrieve.add_argument("--tag", action="append", required=True); retrieve.add_argument("--limit", type=int, default=5)
     integ=sub.add_parser("record-integration"); integ.add_argument("--loop", required=True); integ.add_argument("--name", required=True); integ.add_argument("--status", required=True); integ.add_argument("--artifact"); integ.add_argument("--detail", default="")
     auth=sub.add_parser("authorize-lifecycle"); auth.add_argument("--evidence", required=True)
@@ -67,6 +70,16 @@ def main(argv=None):
             from .continuation_runner import bridge_preflight
             state=bridge_preflight(root, core.load(root), args.host_bridge_command)
         elif args.command == "continuation": state=core.continuation_directive(core.load(root))
+        elif args.command == "artifact-context": state=core.artifact_context(root, core.load(root), args.artifact_type)
+        elif args.command == "write-bound-artifact":
+            state=core.load(root); state={"artifact_ref": core.write_bound_artifact(root, state, args.artifact_type, args.payload, args.output_name)}
+        elif args.command == "validate-stage-artifacts":
+            state=core.load(root); artifacts={}
+            for item in args.artifact:
+                key, separator, ref = item.partition("=")
+                if not separator or not key or not ref or key in artifacts: raise core.PolicyError("--artifact must be unique key=ref")
+                artifacts[key] = ref
+            state=core.validate_stage_artifacts(root, state, artifacts)
         elif args.command == "capture-worktree-baseline":
             state=core.load(root); core.capture_worktree_baseline(root, state); core.save(root, state)
         elif args.command == "alerts":

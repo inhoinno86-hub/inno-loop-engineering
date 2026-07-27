@@ -81,6 +81,38 @@ class LoopEngineTest(unittest.TestCase):
         matrix = self.write(root, state, f"project-plan/iteration-{iteration}/validation-matrix.json", {"input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "plan_iteration": iteration, "validations": [{"validation_id": "validation-1", "required": True, "procedure": "test"}], "criteria": [{"criterion_id": "criterion-1", "weight": 100, "mandatory": mandatory, "critical": False, "validation_ids": ["validation-1"]}]})
         core.complete_plan(root, state, packet_ref, plan, matrix)
 
+    def test_bound_artifact_injects_trusted_plan_bindings_and_validates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "intent.md").write_text("intent", encoding="utf-8")
+            state = core.start_run(root, "intent", "intent.md", True, 3, False)
+            self.complete_init(root, state)
+            packet_ref, packet = self.packet(root, state, "project-plan", [*state["init_outputs"]["artifacts"], {"content_hash": state["init_outputs"]["quality_gate_hash"]}])
+            gate = self.gate(root, state, "project-plan"); self.integrations(root, state, "project-plan")
+            iteration = state["plan_iteration"]
+            (root / "plan-payload.json").write_text(json.dumps({"tasks": [{"task_id": "task-1", "scope": "local", "owner": "agent", "dependencies": [], "definition_of_done": "done", "validation": "test", "rollback": "revert", "criterion_ids": ["criterion-1"], "validation_ids": ["validation-1"]}]}), encoding="utf-8")
+            (root / "matrix-payload.json").write_text(json.dumps({"validations": [{"validation_id": "validation-1", "required": True, "procedure": "test"}], "criteria": [{"criterion_id": "criterion-1", "weight": 1, "mandatory": True, "critical": False, "validation_ids": ["validation-1"]}]}), encoding="utf-8")
+            plan_ref = core.write_bound_artifact(root, state, "execution_plan", "plan-payload.json", "execution-plan.json")
+            matrix_ref = core.write_bound_artifact(root, state, "validation_matrix", "matrix-payload.json", "validation-matrix.json")
+            plan, _ = core._json_artifact(root, state, plan_ref)
+            self.assertEqual(plan["quality_gate_hash"], gate["judge"]["content_hash"])
+            self.assertEqual(plan["tasks"][0]["source_input_hash"], packet["content_hash"])
+            self.assertIsNone(plan["tasks"][0]["source_plan_revision_hash"])
+            self.assertEqual(core.validate_stage_artifacts(root, state, {"input_packet": packet_ref, "execution_plan": plan_ref, "validation_matrix": matrix_ref})["valid"], True)
+
+    def test_submission_rejects_unvalidated_plan_without_recording_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "intent.md").write_text("intent", encoding="utf-8")
+            state = core.start_run(root, "intent", "intent.md", True, 3, False)
+            self.complete_init(root, state)
+            packet_ref, _ = self.packet(root, state, "project-plan", [*state["init_outputs"]["artifacts"], {"content_hash": state["init_outputs"]["quality_gate_hash"]}])
+            self.gate(root, state, "project-plan"); self.integrations(root, state, "project-plan")
+            plan_ref = self.write(root, state, "project-plan/iteration-1/execution-plan.json", {"input_packet_hash": "wrong", "plan_iteration": 1, "tasks": []})
+            matrix_ref = self.write(root, state, "project-plan/iteration-1/validation-matrix.json", {"input_packet_hash": "wrong", "plan_iteration": 1, "validations": [], "criteria": []})
+            submission = self.write(root, state, "project-plan/iteration-1/stage-submission.json", {"loop": "project-plan", "iteration": 1, "artifacts": {"input_packet": packet_ref, "execution_plan": plan_ref, "validation_matrix": matrix_ref}})
+            with self.assertRaises(core.PolicyError):
+                core.record_stage_submission(root, state, submission)
+            self.assertNotIn("project-plan:1", state["stage_submissions"])
+
     def complete_run(self, root, state, advance=True):
         revision = state["plan_revisions"][-1]
         plan_hash = revision["execution_plan"]["content_hash"]; matrix_hash = revision["validation_matrix"]["content_hash"]

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -842,6 +843,97 @@ def complete_plan(project_root: Path, state: dict, packet_ref: str, plan_ref: st
     transition(state, "complete-plan", plan_descriptor["artifact_ref"])
 
 
+def artifact_context(project_root: Path, state: dict, artifact_type: str) -> dict:
+    """Return trusted bindings and required fields for one current-stage artifact."""
+    root = _validate_root(project_root)
+    loop = state.get("current_loop")
+    iteration = 0 if loop == "project-init" else state.get("plan_iteration")
+    contracts = {
+        "project-init": {
+            "charter": ("goal", "scope", "requirements", "non_goals", "assumptions", "risks", "safety_approval_policy", "success_criteria", "open_decisions"),
+            "design": ("goal", "scope", "requirements", "non_goals", "assumptions", "risks", "safety_approval_policy", "success_criteria", "open_decisions"),
+            "roadmap": ("goal", "scope", "requirements", "non_goals", "assumptions", "risks", "safety_approval_policy", "success_criteria", "open_decisions"),
+        },
+        "project-plan": {
+            "execution_plan": ("tasks",),
+            "validation_matrix": ("validations", "criteria"),
+        },
+    }
+    if artifact_type not in contracts.get(loop, {}):
+        raise PolicyError("unsupported artifact type for current loop")
+    packet = state.get("input_packets", {}).get(_packet_key(loop, iteration))
+    gate = state.get("quality_gates", {}).get(_packet_key(loop, iteration))
+    if not packet or not gate or not gate.get("accepted"):
+        raise PolicyError("accepted input packet and quality gate are required")
+    bindings = {"input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"]}
+    if loop == "project-plan":
+        bindings["plan_iteration"] = iteration
+        bindings["source_plan_revision_hash"] = state["plan_revisions"][-1]["execution_plan"]["content_hash"] if state.get("plan_revisions") else None
+    return {
+        "loop": loop,
+        "iteration": iteration,
+        "artifact_type": artifact_type,
+        "trusted_bindings": bindings,
+        "required_semantic_fields": list(contracts[loop][artifact_type]),
+        "task_required_fields": (["task_id", "scope", "owner", "dependencies", "definition_of_done", "validation", "rollback", "criterion_ids", "validation_ids"] if artifact_type == "execution_plan" else []),
+        "note": "Core writes trusted bindings. Semantic fields remain required and are validated before submission.",
+    }
+
+
+def write_bound_artifact(project_root: Path, state: dict, artifact_type: str, payload_ref: str, output_name: str) -> str:
+    """Atomically write a current-stage artifact with Core-owned provenance bindings."""
+    root = _validate_root(project_root)
+    context = artifact_context(root, state, artifact_type)
+    payload_path = _artifact(root, state["run_id"], payload_ref) if payload_ref.startswith(str(RUNS_RELATIVE)) else (root / payload_ref).resolve()
+    try:
+        payload_path.relative_to(root)
+    except ValueError as error:
+        raise PolicyError("payload must be inside project root") from error
+    if not payload_path.is_file() or payload_path.is_symlink():
+        raise PolicyError("payload must be a project-local regular file")
+    try:
+        value = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PolicyError("payload must be valid JSON") from error
+    if not isinstance(value, dict):
+        raise PolicyError("payload must be a JSON object")
+    for key, trusted in context["trusted_bindings"].items():
+        if key in value and value[key] != trusted:
+            raise PolicyError(f"payload may not override trusted binding: {key}")
+        value[key] = trusted
+    _fields(value, tuple(context["required_semantic_fields"]), f"{artifact_type} payload")
+    if artifact_type == "execution_plan":
+        for task in value.get("tasks", []):
+            if not isinstance(task, dict):
+                raise PolicyError("execution plan task must be an object")
+            for key, trusted in (("source_input_hash", context["trusted_bindings"]["input_packet_hash"]), ("source_plan_revision_hash", context["trusted_bindings"]["source_plan_revision_hash"])):
+                if key in task and task[key] != trusted:
+                    raise PolicyError(f"task may not override trusted binding: {key}")
+                task[key] = trusted
+            _fields(task, ("task_id", "scope", "owner", "dependencies", "definition_of_done", "validation", "rollback", "source_input_hash", "source_plan_revision_hash", "criterion_ids", "validation_ids"), "execution plan task")
+    if Path(output_name).name != output_name or not output_name.endswith(".json"):
+        raise PolicyError("output name must be a simple .json filename")
+    return _artifact_write(root, state, f"{context['loop']}/iteration-{context['iteration']}/{output_name}", value)
+
+
+def validate_stage_artifacts(project_root: Path, state: dict, artifacts: dict[str, str]) -> dict:
+    """Validate a stage without persisting a transition or registering submission evidence."""
+    root = _validate_root(project_root)
+    if not isinstance(artifacts, dict):
+        raise PolicyError("stage artifacts must be an object")
+    candidate = deepcopy(state)
+    loop = candidate.get("current_loop")
+    if loop == "project-init":
+        complete_init(root, candidate, artifacts.get("input_packet", ""), artifacts.get("charter", ""), artifacts.get("design", ""), artifacts.get("roadmap", ""))
+    elif loop == "project-plan":
+        complete_plan(root, candidate, artifacts.get("input_packet", ""), artifacts.get("execution_plan", ""), artifacts.get("validation_matrix", ""))
+    elif loop == "project-run":
+        complete_run(root, candidate, artifacts.get("run_report", ""))
+    else:
+        raise PolicyError("read-only validation is not available for project-review")
+    return {"loop": loop, "iteration": 0 if loop == "project-init" else state.get("plan_iteration"), "valid": True}
+
+
 def _active_revision(state: dict) -> dict:
     if not state.get("plan_revisions") or state["plan_revisions"][-1]["iteration"] != state.get("plan_iteration"):
         raise PolicyError("current plan revision is required")
@@ -876,6 +968,8 @@ def record_stage_submission(project_root: Path, state: dict, artifact_ref: str) 
         raise PolicyError("invalid stage submission artifacts")
     for ref in artifacts.values():
         _artifact(root, state["run_id"], ref)
+    if loop != "project-review":
+        validate_stage_artifacts(root, state, artifacts)
     state["stage_submissions"][_submission_key(loop, iteration)] = descriptor
     add_evidence(state, "stage-submission", json.dumps(descriptor, sort_keys=True))
     return descriptor

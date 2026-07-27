@@ -31,7 +31,10 @@ manifest containing only its artifact references. Do not invoke `plan`, `run`,
 `review`, `review-complete`, `replan`, `defer`, `complete-init`, or `complete-plan`:
 the supervisor validates the submission and selects that command. Stop after the
 submission, a terminal/HIL BLOCKED state, or a real safety gate. Do not commit, push,
-deploy, publish, or contact external services."""
+deploy, publish, or contact external services.
+
+Before creating a bound init/plan artifact, call `{controller} artifact-context --artifact-type <type>`.
+Write semantic JSON payloads only, then call `{controller} write-bound-artifact --artifact-type <type> --payload <payload-ref> --output-name <name>.json`; Core owns all hash bindings. Before recording a submission, call `{controller} validate-stage-artifacts --artifact key=ref` for every required artifact. A nonzero validation result means fix the artifact and do not record a stage submission."""
 
 
 def _state_identity(state: dict) -> dict:
