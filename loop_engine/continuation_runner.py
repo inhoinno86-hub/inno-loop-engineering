@@ -17,7 +17,35 @@ DEFAULT_INTEGRATION_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 
 
-def _prompt(root: Path, directive: dict) -> str:
+def _external_access_instruction(state: dict) -> str:
+    """Expose only an owner-approved, narrowly scoped public retrieval grant.
+
+    Resume evidence is immutable lifecycle evidence.  A worker must otherwise
+    remain unable to contact external services, even after a non-HIL failure.
+    """
+    for event in reversed(state.get("verification_evidence", [])):
+        if event.get("kind") != "resume":
+            continue
+        try:
+            approval = json.loads(event.get("value", ""))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        policy = approval.get("next_attempt_policy")
+        if not isinstance(policy, dict) or policy.get("allow_public_bitget_protocol_document_retrieval") is not True:
+            continue
+        if policy.get("scope") != "official-public-documentation-only":
+            continue
+        return (
+            "External access exception: the project owner approved retrieval of Bitget "
+            "official public protocol documentation only. You may retrieve and record "
+            "that documentation as immutable evidence. Do not authenticate, submit "
+            "requests that alter state, use private or trading endpoints, or contact "
+            "any other external service."
+        )
+    return "Do not contact external services."
+
+
+def _prompt(root: Path, directive: dict, state: dict | None = None) -> str:
     controller = f"loop-engine --project-root {shlex.quote(str(root))}"
     return f"""You are the local Loop Engine continuation worker. Work only in the current
 repository and execute exactly the current lifecycle stage: {directive['loop']}.
@@ -31,10 +59,10 @@ manifest containing only its artifact references. Do not invoke `plan`, `run`,
 `review`, `review-complete`, `replan`, `defer`, `complete-init`, or `complete-plan`:
 the supervisor validates the submission and selects that command. Stop after the
 submission, a terminal/HIL BLOCKED state, or a real safety gate. Do not commit, push,
-deploy, publish, or contact external services.
+deploy, or publish. {_external_access_instruction(state or {})}
 
 Before creating a bound init/plan artifact, call `{controller} artifact-context --artifact-type <type>`.
-Write semantic JSON payloads only, then call `{controller} write-bound-artifact --artifact-type <type> --payload <payload-ref> --output-name <name>.json`; Core owns all hash bindings. Before recording a submission, call `{controller} validate-stage-artifacts --artifact key=ref` for every required artifact. A nonzero validation result means fix the artifact and do not record a stage submission."""
+Write semantic JSON payloads only, then call `{controller} write-bound-artifact --artifact-type <type> --payload <payload-ref> --output-name <name>.json`; Core owns all hash bindings. Validation receipts are immutable: never overwrite a receipt already recorded in state. For a rerun, create a new receipt file and set `supersedes_artifact_ref` to the prior receipt artifact reference before recording it. Before recording a submission, call `{controller} validate-stage-artifacts --artifact key=ref` for every required artifact. A nonzero validation result means fix the artifact and do not record a stage submission."""
 
 
 def _state_identity(state: dict) -> dict:
@@ -279,6 +307,7 @@ def main(argv=None) -> int:
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--max-stages", type=int, default=64)
     parser.add_argument("--codex-bin", default="codex")
+    parser.add_argument("--codex-sandbox", choices=("read-only", "workspace-write", "danger-full-access"))
     parser.add_argument("--integration-adapter", "--host-bridge-command", dest="integration_adapter", help="host-owned planning-integration bridge command")
     parser.add_argument("--integration-retries", type=int, default=DEFAULT_INTEGRATION_RETRIES)
     parser.add_argument("--integration-retry-backoff-seconds", type=float, default=DEFAULT_RETRY_BACKOFF_SECONDS)
@@ -312,7 +341,11 @@ def main(argv=None) -> int:
             state = core.load(root); directive = core.continuation_directive(state)
         output = core.artifacts_path(root, state["run_id"]) / "continuation" / f"attempt-{attempt}.md"
         output.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run([args.codex_bin, "exec", "-C", str(root), "--output-last-message", str(output), _prompt(root, directive)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        command = [args.codex_bin, "exec"]
+        if args.codex_sandbox:
+            command.extend(["--sandbox", args.codex_sandbox])
+        command.extend(["-C", str(root), "--output-last-message", str(output), _prompt(root, directive, state)])
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             detail = core.redact((result.stderr or result.stdout or "agent runtime failed")[-4000:])
             core.block(state, "continuation_agent_failed", False, detail); core.save(root, state)
@@ -323,7 +356,11 @@ def main(argv=None) -> int:
             execute_stage(root, expected)
         except core.PolicyError as error:
             updated = core.load(root)
-            if _state_identity(updated) != expected:
+            if updated.get("outcome") == "BLOCKED":
+                # The worker may legitimately stop at a real safety gate. Preserve
+                # that gate instead of overwriting it with an executor-side error.
+                pass
+            elif _state_identity(updated) != expected:
                 core.block(updated, "continuation_stage_executor_unexpected_state", False, str(error))
             else:
                 core.block(updated, "continuation_stage_executor_validation_failed", False, str(error))

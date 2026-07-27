@@ -56,7 +56,7 @@ def main(argv=None):
     sub.add_parser("continuation")
     sub.add_parser("capture-worktree-baseline")
     alerts=sub.add_parser("alerts"); alertsub=alerts.add_subparsers(dest="alert_command", required=True); alertsub.add_parser("pending"); ack=alertsub.add_parser("ack"); ack.add_argument("--alert-id", required=True); ack.add_argument("--receipt", required=True)
-    runner=sub.add_parser("continue-until-terminal"); runner.add_argument("--max-stages", type=int, default=64); runner.add_argument("--codex-bin", default="codex"); runner.add_argument("--integration-adapter", "--host-bridge-command", dest="integration_adapter"); runner.add_argument("--integration-retries", type=int, default=2); runner.add_argument("--integration-retry-backoff-seconds", type=float, default=1.0); runner.add_argument("--alert-adapter")
+    runner=sub.add_parser("continue-until-terminal"); runner.add_argument("--max-stages", type=int, default=64); runner.add_argument("--codex-bin", default="codex"); runner.add_argument("--codex-sandbox", choices=("read-only", "workspace-write", "danger-full-access")); runner.add_argument("--integration-adapter", "--host-bridge-command", dest="integration_adapter"); runner.add_argument("--integration-retries", type=int, default=2); runner.add_argument("--integration-retry-backoff-seconds", type=float, default=1.0); runner.add_argument("--alert-adapter")
     runs=sub.add_parser("runs"); runsub=runs.add_subparsers(dest="run_command", required=True); runsub.add_parser("list"); select=runsub.add_parser("select"); select.add_argument("--run-id", required=True); lease=runsub.add_parser("lease"); lease.add_argument("--holder", required=True); lease.add_argument("--timeout-seconds", type=int, default=300); release=runsub.add_parser("release-lease"); release.add_argument("--holder", required=True)
     registry=sub.add_parser("registry"); rsub=registry.add_subparsers(dest="registry_command", required=True); add=rsub.add_parser("add"); add.add_argument("--agent-id", required=True); add.add_argument("--parent-id"); add.add_argument("--depth", type=int, required=True); add.add_argument("--scope", required=True); update=rsub.add_parser("update"); update.add_argument("--agent-id", required=True); update.add_argument("--status", required=True); rsub.add_parser("list")
     heartbeat=sub.add_parser("heartbeat"); hsub=heartbeat.add_subparsers(dest="heartbeat_command", required=True); touch=hsub.add_parser("touch"); touch.add_argument("--agent-id", required=True); hstatus=hsub.add_parser("status"); hstatus.add_argument("--timeout-seconds", type=int, default=300)
@@ -91,6 +91,7 @@ def main(argv=None):
         elif args.command == "continue-until-terminal":
             from .continuation_runner import main as runner_main
             runner_args = ["--project-root", str(root), "--max-stages", str(args.max_stages), "--codex-bin", args.codex_bin, "--integration-retries", str(args.integration_retries), "--integration-retry-backoff-seconds", str(args.integration_retry_backoff_seconds)]
+            if args.codex_sandbox: runner_args.extend(["--codex-sandbox", args.codex_sandbox])
             if args.integration_adapter: runner_args.extend(["--integration-adapter", args.integration_adapter])
             if args.alert_adapter: runner_args.extend(["--alert-adapter", args.alert_adapter])
             return runner_main(runner_args)

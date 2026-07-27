@@ -359,6 +359,36 @@ def resolve_alerts_for_block(state: dict, blocked: dict, resolution: str) -> int
     return resolved
 
 
+def resolve_approved_public_documentation_alert(state: dict, approval: dict) -> int:
+    """Resolve the one HIL alert covered by a narrowly validated resume grant."""
+    policy = approval.get("next_attempt_policy")
+    refs = approval.get("remediation_evidence_refs")
+    if (not isinstance(policy, dict)
+            or policy.get("allow_public_bitget_protocol_document_retrieval") is not True
+            or policy.get("scope") != "official-public-documentation-only"
+            or not isinstance(refs, list)):
+        return 0
+    alert_ids = {item.split(":", 1)[1] for item in refs if isinstance(item, str) and item.startswith("pending-alert:")}
+    resolved = 0
+    for alert in state.get("alerts", []):
+        if alert.get("alert_id") not in alert_ids or alert.get("delivery") != "PENDING":
+            continue
+        try:
+            request = json.loads(alert.get("evidence", ""))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        initial_request = (request.get("action") == "retrieve and record official Bitget public protocol documentation required by P0"
+                           and request.get("requested_decision") == "authorize documented public-contract retrieval or confirm offline-only scope")
+        restored_access_request = (policy.get("restore_official_documentation_access") is True
+                                   and request.get("action") == "provide accessible immutable Bitget official public protocol documentation evidence or restore official-doc retrieval"
+                                   and request.get("requested_decision") == "authorize a verified project-local official-document snapshot or restore access to Bitget official public documentation only")
+        if (alert.get("kind") == "hil-blocked" and alert.get("reason") == "uncertain_risk"
+                and (initial_request or restored_access_request)):
+            alert.update({"delivery": "RESOLVED", "resolution": "validated project-owner public-documentation approval", "resolved_at": now()})
+            resolved += 1
+    return resolved
+
+
 def capture_worktree_baseline(project_root: Path, state: dict) -> dict:
     root = _validate_root(project_root)
     if state.get("worktree_baseline"):
@@ -1075,8 +1105,15 @@ def record_validation_receipt(project_root: Path, state: dict, artifact_ref: str
         valid = isinstance(value[field], str) and bool(value[field].strip()) if field != "evidence_refs" else isinstance(value[field], list) and bool(value[field]) and all(isinstance(ref, str) and ref for ref in value[field])
         if not valid:
             raise PolicyError("invalid validation receipt provenance")
-    if any(item.get("validation_id") == value["validation_id"] for item in state["validation_receipts"]): raise PolicyError("validation receipt already recorded")
-    record = {**descriptor, "validation_id": value["validation_id"], "status": value["status"]}
+    prior = [item for item in state["validation_receipts"] if item.get("validation_id") == value["validation_id"]]
+    supersedes = value.get("supersedes_artifact_ref")
+    if prior:
+        if (not isinstance(supersedes, str) or supersedes not in {item["artifact_ref"] for item in prior}
+                or supersedes == artifact_ref):
+            raise PolicyError("replacement validation receipt must supersede a prior immutable receipt")
+    elif supersedes is not None:
+        raise PolicyError("initial validation receipt must not declare supersession")
+    record = {**descriptor, "validation_id": value["validation_id"], "status": value["status"], "supersedes_artifact_ref": supersedes}
     state["validation_receipts"].append(record); add_evidence(state, "validation-receipt", json.dumps(record, sort_keys=True)); return record
 
 
@@ -1339,6 +1376,7 @@ def transition(state: dict, event: str, evidence: str = "", backlog: dict | None
                 state["max_replans"] = replacement; state["replan_policy"] = {"mode": "bounded", "max_replans": replacement}
             else: raise PolicyError("max replan resume requires replacement bound")
         resolve_alerts_for_block(state, blocked, "validated project-owner resume")
+        resolve_approved_public_documentation_alert(state, approval)
         state["outcome"] = None; state["block"] = None; add_evidence(state, event, evidence); return
     raise PolicyError("unknown event")
 
