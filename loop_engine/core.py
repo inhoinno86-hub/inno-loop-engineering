@@ -929,8 +929,32 @@ def validate_stage_artifacts(project_root: Path, state: dict, artifacts: dict[st
         complete_plan(root, candidate, artifacts.get("input_packet", ""), artifacts.get("execution_plan", ""), artifacts.get("validation_matrix", ""))
     elif loop == "project-run":
         complete_run(root, candidate, artifacts.get("run_report", ""))
+    elif loop == "project-review":
+        review_ref = artifacts.get("review_artifact", "")
+        if not state.get("review_artifact") or state["review_artifact"].get("artifact_ref") != review_ref:
+            raise PolicyError("review artifact must be recorded before stage validation")
+        record_review_artifact(root, candidate, review_ref)
+        revision = _active_revision(candidate)
+        matrix, _ = _json_artifact(root, candidate, revision["validation_matrix"]["artifact_ref"])
+        failures = {item["criterion_id"] for item in _json_artifact(root, candidate, review_ref)[0]["acceptance_results"] if item["verdict"] != "PASS"}
+        protected = {item["criterion_id"] for item in matrix["criteria"] if item["mandatory"] or item["critical"]}
+        if not failures:
+            complete_review(root, candidate, review_ref)
+        elif failures & protected:
+            remediation_ref = artifacts.get("remediation_packet", "")
+            if not state.get("remediation_packet") or state["remediation_packet"].get("artifact_ref") != remediation_ref:
+                raise PolicyError("protected review failure requires a recorded remediation packet")
+            packet = record_remediation_packet(root, candidate, remediation_ref)
+            if not (failures & protected).issubset(set(packet["packet"]["failed_acceptance_criteria"])):
+                raise PolicyError("remediation packet omits protected review failure")
+            candidate["remediation_packet"] = packet
+        else:
+            backlog_ref = artifacts.get("backlog_item", "")
+            if not backlog_ref:
+                raise PolicyError("nonprotected review failure requires backlog item")
+            defer(root, candidate, backlog_ref)
     else:
-        raise PolicyError("read-only validation is not available for project-review")
+        raise PolicyError("unsupported current loop")
     return {"loop": loop, "iteration": 0 if loop == "project-init" else state.get("plan_iteration"), "valid": True}
 
 
@@ -968,8 +992,7 @@ def record_stage_submission(project_root: Path, state: dict, artifact_ref: str) 
         raise PolicyError("invalid stage submission artifacts")
     for ref in artifacts.values():
         _artifact(root, state["run_id"], ref)
-    if loop != "project-review":
-        validate_stage_artifacts(root, state, artifacts)
+    validate_stage_artifacts(root, state, artifacts)
     state["stage_submissions"][_submission_key(loop, iteration)] = descriptor
     add_evidence(state, "stage-submission", json.dumps(descriptor, sort_keys=True))
     return descriptor

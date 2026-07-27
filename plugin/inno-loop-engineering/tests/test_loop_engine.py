@@ -206,6 +206,22 @@ class LoopEngineTest(unittest.TestCase):
             self.assertEqual(continuation_runner.execute_stage(root, expected)["command"], "review-complete")
             self.assertEqual(core.load(root)["outcome"], "COMPLETE")
 
+    def test_review_validator_is_read_only_and_requires_remediation_for_protected_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.complete_init(root, state); self.complete_plan(root, state)
+            plan_hash, matrix_hash, package = self.complete_run(root, state)
+            review = self.write(root, state, "project-review/iteration-1/review-validator.json", {
+                "plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash,
+                "prompt_package_hash": package["content_hash"], "run_report_hash": state["run_report"]["content_hash"],
+                "acceptance_results": [{"criterion_id": "criterion-1", "verdict": "FAIL", "evidence_refs": ["e"], "confidence": 1}], "reviewer_ids": ["reviewer"],
+            })
+            core.record_review_artifact(root, state, review)
+            with self.assertRaisesRegex(core.PolicyError, "remediation"):
+                core.validate_stage_artifacts(root, state, {"review_artifact": review})
+            self.assertIsNone(state["remediation_packet"])
+            self.assertIsNone(state["outcome"])
+
     def test_stage_executor_defers_nonmandatory_review_finding(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
