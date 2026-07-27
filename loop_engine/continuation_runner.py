@@ -22,14 +22,77 @@ def _prompt(root: Path, directive: dict) -> str:
     return f"""You are the local Loop Engine continuation worker. Work only in the current
 repository and execute exactly the current lifecycle stage: {directive['loop']}.
 Read the active state with `{controller} status`. Use only the installed
-`loop-engine` CLI for lifecycle actions; this project is not expected to contain a
-plugin checkout or skill files. Required Ouroboros/Superpowers planning integrations
-are host-owned and recorded before you run; do not invoke them yourself. Do not ask
-the user for routine approval or give progress reports. Persist every required
-artifact and transition for {directive['loop']} iteration {directive['iteration']}.
-Stop your own work only after advancing the lifecycle, reaching a terminal/HIL
-BLOCKED state, or encountering a real safety gate. Do not commit, push, deploy,
-publish, or contact external services."""
+`loop-engine` CLI for artifact-recording actions; this project is not expected to
+contain a plugin checkout or skill files. Required Ouroboros/Superpowers planning
+integrations are host-owned and recorded before you run; do not invoke them yourself.
+Do not ask the user for routine approval or give progress reports. Create and record
+every required artifact, then record one current-loop `record-stage-submission`
+manifest containing only its artifact references. Do not invoke `plan`, `run`,
+`review`, `review-complete`, `replan`, `defer`, `complete-init`, or `complete-plan`:
+the supervisor validates the submission and selects that command. Stop after the
+submission, a terminal/HIL BLOCKED state, or a real safety gate. Do not commit, push,
+deploy, publish, or contact external services."""
+
+
+def _state_identity(state: dict) -> dict:
+    return {"run_id": state.get("run_id"), "loop": state.get("current_loop"),
+            "iteration": 0 if state.get("current_loop") == "project-init" else state.get("plan_iteration"),
+            "outcome": state.get("outcome")}
+
+
+def _submission(root: Path, state: dict, directive: dict) -> tuple[dict, dict]:
+    key = f"{directive['loop']}:{directive['iteration']}"
+    descriptor = state.get("stage_submissions", {}).get(key)
+    if not descriptor:
+        raise core.PolicyError("stage executor submission is required")
+    value, current = core._json_artifact(root, state, descriptor["artifact_ref"])
+    if current["content_hash"] != descriptor["content_hash"]:
+        raise core.PolicyError("stage submission hash changed")
+    return value, descriptor
+
+
+def execute_stage(root: Path, expected: dict) -> dict:
+    """Validate a worker submission and perform exactly one lifecycle transition."""
+    state = core.load(root)
+    if _state_identity(state) != {key: expected[key] for key in ("run_id", "loop", "iteration", "outcome")}:
+        raise core.PolicyError("stage executor observed unexpected state change")
+    directive = core.continuation_directive(state)
+    if directive["action"] != "continue" or directive["loop"] != expected["loop"] or directive["iteration"] != expected["iteration"]:
+        raise core.PolicyError("stage executor directive changed")
+    submission, descriptor = _submission(root, state, directive); artifacts = submission["artifacts"]
+    loop = directive["loop"]
+    if loop == "project-init":
+        core.complete_init(root, state, artifacts.get("input_packet", ""), artifacts.get("charter", ""), artifacts.get("design", ""), artifacts.get("roadmap", "")); command = "complete-init"
+    elif loop == "project-plan":
+        core.complete_plan(root, state, artifacts.get("input_packet", ""), artifacts.get("execution_plan", ""), artifacts.get("validation_matrix", "")); command = "complete-plan"
+    elif loop == "project-run":
+        report = artifacts.get("run_report", "")
+        core.complete_run(root, state, report); command = "review"
+    else:
+        review_ref = artifacts.get("review_artifact", "")
+        if not state.get("review_artifact") or state["review_artifact"]["artifact_ref"] != review_ref:
+            raise core.PolicyError("stage submission must reference recorded review artifact")
+        review, _ = core._json_artifact(root, state, review_ref)
+        matrix, _ = core._json_artifact(root, state, core._active_revision(state)["validation_matrix"]["artifact_ref"])
+        protected = {item["criterion_id"] for item in matrix["criteria"] if item["mandatory"] or item["critical"]}
+        failures = {item["criterion_id"] for item in review["acceptance_results"] if item["verdict"] != "PASS"}
+        if not failures:
+            core.complete_review(root, state, review_ref); command = "review-complete"
+        elif failures & protected:
+            remediation = artifacts.get("remediation_packet", "")
+            if not state.get("remediation_packet") or state["remediation_packet"]["artifact_ref"] != remediation:
+                raise core.PolicyError("failing protected review requires recorded remediation packet")
+            core.transition(state, "replan", remediation); command = "replan"
+        else:
+            backlog = artifacts.get("backlog_item", "")
+            if not backlog:
+                raise core.PolicyError("nonmandatory review findings require backlog item")
+            core.defer(root, state, backlog); command = "defer"
+    receipt = {"executor": "stage-executor", "input": expected, "submission": descriptor,
+               "command": command, "result": _state_identity(state)}
+    core._artifact_write(root, state, f"continuation/stage-executor-{expected['loop']}-{expected['iteration']}.json", receipt)
+    core.save(root, state)
+    return receipt
 
 
 def _planning_integrations_ready(state: dict) -> bool:
@@ -252,9 +315,16 @@ def main(argv=None) -> int:
             core.block(state, "continuation_agent_failed", False, detail); core.save(root, state)
             _deliver_alerts(root, state, args.alert_adapter); core.save(root, state)
             print(json.dumps(core.continuation_directive(state), sort_keys=True)); return 2
-        updated = core.load(root)
-        if updated["current_loop"] == state["current_loop"] and updated.get("outcome") == state.get("outcome"):
-            core.block(updated, "continuation_agent_no_transition", False, str(output.relative_to(root))); core.save(root, updated)
+        expected = _state_identity(state)
+        try:
+            execute_stage(root, expected)
+        except core.PolicyError as error:
+            updated = core.load(root)
+            if _state_identity(updated) != expected:
+                core.block(updated, "continuation_stage_executor_unexpected_state", False, str(error))
+            else:
+                core.block(updated, "continuation_stage_executor_validation_failed", False, str(error))
+            core.save(root, updated)
             _deliver_alerts(root, updated, args.alert_adapter); core.save(root, updated)
             print(json.dumps(core.continuation_directive(updated), sort_keys=True)); return 2
     raise SystemExit("continuation max-stages exhausted")

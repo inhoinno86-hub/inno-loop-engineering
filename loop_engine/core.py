@@ -188,6 +188,7 @@ def _normalize(state: dict) -> None:
     state.setdefault("init_outputs", None)
     state.setdefault("plan_revisions", [])
     state.setdefault("review_artifact", None)
+    state.setdefault("stage_submissions", {})
     state.setdefault("execution_policy", None)
     state.setdefault("prompt_package", None)
     state.setdefault("run_report", None)
@@ -201,7 +202,7 @@ def _normalize(state: dict) -> None:
     state.setdefault("alerts", [])
     state.setdefault("worktree_baseline", None)
     state.setdefault("replan_policy", {"mode": "bounded", "max_replans": state.get("max_replans", DEFAULT_MAX_REPLANS)})
-    state["artifact_version"] = max(int(state.get("artifact_version", 1)), 4)
+    state["artifact_version"] = max(int(state.get("artifact_version", 1)), 5)
 
 
 def load(project_root: Path) -> dict:
@@ -237,7 +238,7 @@ def initialize(project_root: Path, intent: str, source_ref: str = "inline", full
     if max_replans < 1:
         raise PolicyError("max replans must be positive")
     record = _input_record(intent, source_ref)
-    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 4, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "epistemic_ledgers": {}, "trajectory_summaries": [], "trajectory_retrievals": [], "agent_health": {}, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
+    state = {"schema_version": 1, "run_id": str(uuid.uuid4()), "current_loop": "project-init", "outcome": None, "input_hash": record["content_hash"], "input": record, "artifact_version": 5, "checkpoint": None, "lifecycle_authorization": {"scope": "full-lifecycle", "evidence": "explicit inno-loop invocation", "recorded_at": now()} if full_lifecycle else None, "continuation_policy": {"mode": "automatic", "user_output": "terminal-or-hil-only"}, "alerts": [], "worktree_baseline": None, "replan_policy": {"mode": "bounded", "max_replans": max_replans}, "last_review_outcome": None, "replan_history": [], "max_replans": max_replans, "plan_iteration": 1, "decision_log": [], "assumption_log": [], "verification_evidence": [], "integration_evidence": [], "decision_a": None, "input_packets": {}, "quality_gates": {}, "init_outputs": None, "plan_revisions": [], "review_artifact": None, "stage_submissions": {}, "execution_policy": None, "prompt_package": None, "run_report": None, "validation_receipts": [], "review_input": None, "epistemic_ledgers": {}, "trajectory_summaries": [], "trajectory_retrievals": [], "agent_health": {}, "remediation_packet": None, "backlog": [], "block": None, "failure_history": [], "replan_count": 0, "created_at": now()}
     snapshot = _artifact_write(root, state, "project-init/iteration-0/lifecycle-input.md", intent)
     state["input"] = {**record, "artifact_ref": snapshot}
     save(root, state)
@@ -845,6 +846,39 @@ def _active_revision(state: dict) -> dict:
     if not state.get("plan_revisions") or state["plan_revisions"][-1]["iteration"] != state.get("plan_iteration"):
         raise PolicyError("current plan revision is required")
     return state["plan_revisions"][-1]
+
+
+def _submission_key(loop: str, iteration: int) -> str:
+    return f"{loop}:{iteration}"
+
+
+def record_stage_submission(project_root: Path, state: dict, artifact_ref: str) -> dict:
+    """Register worker-produced artifact references for deterministic stage execution.
+
+    A submission intentionally contains no requested transition.  The continuation
+    executor derives the only allowed command from current state and validates the
+    referenced artifacts through the existing completion APIs.
+    """
+    root = _validate_root(project_root)
+    value, descriptor = _json_artifact(root, state, artifact_ref)
+    loop = state.get("current_loop"); iteration = 0 if loop == "project-init" else state.get("plan_iteration")
+    _fields(value, ("loop", "iteration", "artifacts"), "stage submission")
+    if value["loop"] != loop or value["iteration"] != iteration or not isinstance(value["artifacts"], dict):
+        raise PolicyError("stage submission loop or iteration mismatch")
+    expected = {
+        "project-init": {"input_packet", "charter", "design", "roadmap"},
+        "project-plan": {"input_packet", "execution_plan", "validation_matrix"},
+        "project-run": {"run_report"},
+        "project-review": {"review_artifact", "remediation_packet", "backlog_item"},
+    }[loop]
+    artifacts = value["artifacts"]
+    if not set(artifacts).issubset(expected) or not artifacts or not all(isinstance(ref, str) and ref for ref in artifacts.values()):
+        raise PolicyError("invalid stage submission artifacts")
+    for ref in artifacts.values():
+        _artifact(root, state["run_id"], ref)
+    state["stage_submissions"][_submission_key(loop, iteration)] = descriptor
+    add_evidence(state, "stage-submission", json.dumps(descriptor, sort_keys=True))
+    return descriptor
 
 
 def _bound_artifact(root: Path, state: dict, artifact_ref: str, fields: tuple[str, ...], label: str) -> tuple[dict, dict, dict]:

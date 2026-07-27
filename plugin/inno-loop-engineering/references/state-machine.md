@@ -12,6 +12,11 @@ Current loops are `project-init`, `project-plan`, `project-run`, and `project-re
 | project-review | defer | DEFERRED_BACKLOG | nonblocking backlog fields |
 | any loop | block | BLOCKED | block reason and evidence |
 
+Continuation workers record a hash-bound `stage-submission` with artifact
+references for their current loop. The stage executor validates the submission
+against fresh active state and invokes the event in this table; workers do not
+invoke lifecycle transition commands directly.
+
 Only an explicit resume event can leave `BLOCKED`. Human-decision blocks require recorded approval evidence.
 
 An active high-impact unknown cannot reach plan completion without a mapped task

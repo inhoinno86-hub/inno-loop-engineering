@@ -9,7 +9,10 @@ After a versioned plan and validation matrix exist, create and record a
 plan-bound execution-policy artifact, then create and record a prompt-package
 manifest produced by `make-prompts`. Execute the accepted package with
 `exec-prompts`; record every validation receipt and a structured run report.
-Only then call `review --run-report <relative run-report artifact>`.
+Then record a `record-stage-submission --artifact <manifest>` whose only
+artifact reference is that run report. The continuation supervisor validates the
+manifest and calls `review --run-report <relative run-report artifact>`; the
+worker must not invoke the lifecycle transition itself.
 
 The package, receipts, and report must bind to the active plan and validation
 matrix hashes. A prior plan revision's package is audit-only and cannot advance

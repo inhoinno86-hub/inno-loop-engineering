@@ -1,6 +1,6 @@
 # Artifact Contracts
 
-Every state record has `run_id`, `input_hash`, `artifact_version`, `checkpoint`, `lifecycle_authorization`, `last_review_outcome`, `replan_history`, `max_replans`, `decision_log`, `assumption_log`, `epistemic_ledgers`, `trajectory_summaries`, `trajectory_retrievals`, `agent_health`, `verification_evidence`, `integration_evidence`, `input_packets`, `quality_gates`, `init_outputs`, `plan_revisions`, `execution_policy`, `prompt_package`, `run_report`, `validation_receipts`, `review_artifact`, and `remediation_packet`. Each run stores state and artifacts under `.loop-engine/runs/<run-id>/`; `current.json` selects the active run.
+Every state record has `run_id`, `input_hash`, `artifact_version`, `checkpoint`, `lifecycle_authorization`, `last_review_outcome`, `replan_history`, `max_replans`, `decision_log`, `assumption_log`, `epistemic_ledgers`, `trajectory_summaries`, `trajectory_retrievals`, `agent_health`, `verification_evidence`, `integration_evidence`, `input_packets`, `quality_gates`, `init_outputs`, `plan_revisions`, `execution_policy`, `prompt_package`, `run_report`, `validation_receipts`, `review_artifact`, `remediation_packet`, and `stage_submissions`. Each run stores state and artifacts under `.loop-engine/runs/<run-id>/`; `current.json` selects the active run.
 
 An explicit inno-loop request records `lifecycle_authorization` for its internally generated execution plan. It permits progression through plan, run, review, and replan without a separate plan-approval prompt. It never bypasses a safety `BLOCKED` gate.
 
@@ -25,6 +25,17 @@ prompt package bind to the active execution-plan and validation-matrix hashes.
 Run reports and validation receipts also bind to the prompt hash. A plan update
 invalidates derived prompts and run/review evidence that refer to its previous
 hash; they remain audit-only.
+
+A stage submission is immutable JSON with the active `loop`, `iteration`, and
+an `artifacts` object. It contains no requested transition. Init submissions
+reference input packet, charter, design, and roadmap; plan submissions reference
+input packet, execution plan, and validation matrix; run submissions reference
+the recorded run report; review submissions reference the recorded review
+artifact and, when required by the review result, its remediation packet or
+backlog item. The continuation stage executor reloads state, verifies matching
+run/loop/iteration and submission hash, invokes existing core validation, then
+records its selected command and post-transition identity in a run-local receipt.
+Missing, stale, or unexpected state fails closed.
 
 An Epistemic Ledger is an optional, hash-bound artifact scoped to the current
 loop/iteration. It records `known`, `assumption`, `known_unknown`, and

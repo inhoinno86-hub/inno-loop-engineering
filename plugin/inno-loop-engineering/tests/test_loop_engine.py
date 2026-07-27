@@ -66,7 +66,7 @@ class LoopEngineTest(unittest.TestCase):
             }))
         core.complete_init(root, state, packet_ref, *outputs)
 
-    def complete_plan(self, root, state):
+    def complete_plan(self, root, state, mandatory=True):
         init_sources = [*state["init_outputs"]["artifacts"], {"content_hash": state["init_outputs"]["quality_gate_hash"]}]
         if state.get("remediation_packet"):
             init_sources.extend([state["remediation_packet"], state["plan_revisions"][-1]["execution_plan"], state["review_artifact"]])
@@ -78,10 +78,10 @@ class LoopEngineTest(unittest.TestCase):
             "input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "plan_iteration": iteration,
             "tasks": [{"task_id": "task-1", "scope": "local", "owner": "agent", "dependencies": [], "definition_of_done": "done", "validation": "test", "rollback": "revert", "source_input_hash": packet["content_hash"], "source_plan_revision_hash": state["plan_revisions"][-1]["execution_plan"]["content_hash"] if state["plan_revisions"] else None, "criterion_ids": ["criterion-1"], "validation_ids": ["validation-1"]}],
         })
-        matrix = self.write(root, state, f"project-plan/iteration-{iteration}/validation-matrix.json", {"input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "plan_iteration": iteration, "validations": [{"validation_id": "validation-1", "required": True, "procedure": "test"}], "criteria": [{"criterion_id": "criterion-1", "weight": 100, "mandatory": True, "critical": False, "validation_ids": ["validation-1"]}]})
+        matrix = self.write(root, state, f"project-plan/iteration-{iteration}/validation-matrix.json", {"input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"], "plan_iteration": iteration, "validations": [{"validation_id": "validation-1", "required": True, "procedure": "test"}], "criteria": [{"criterion_id": "criterion-1", "weight": 100, "mandatory": mandatory, "critical": False, "validation_ids": ["validation-1"]}]})
         core.complete_plan(root, state, packet_ref, plan, matrix)
 
-    def complete_run(self, root, state):
+    def complete_run(self, root, state, advance=True):
         revision = state["plan_revisions"][-1]
         plan_hash = revision["execution_plan"]["content_hash"]; matrix_hash = revision["validation_matrix"]["content_hash"]
         policy = self.write(root, state, "project-run/iteration-1/execution-policy.json", {"plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash, "superpowers_execution": False, "task_policies": [{"task_id": "task-1", "topology": "coordinator executes locally", "write_scope": ["loop_engine/"], "limits": {"max_files": 1}, "safety_constraints": ["no external actions"], "execution_mode": "normal-codex", "rationale": "single bounded task", "observed_result_refs": ["execution-log"]}], "coordinator_id": "coordinator"})
@@ -91,8 +91,108 @@ class LoopEngineTest(unittest.TestCase):
         receipt = self.write(root, state, "project-run/iteration-1/receipt.json", {"plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash, "prompt_package_hash": package_record["content_hash"], "validation_id": "validation-1", "status": "PASS", "command": "test", "exit_code": 0, "executor_id": "executor", "invocation_id": "test-run", "timestamp": "2026-01-01T00:00:00Z", "evidence_refs": ["test-output"]})
         core.record_validation_receipt(root, state, receipt)
         report = self.write(root, state, "project-run/iteration-1/run-report.json", {"plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash, "prompt_package_hash": package_record["content_hash"], "task_results": [{"task_id": "task-1", "status": "PASS", "evidence_refs": ["test-output"], "executor_id": "executor", "invocation_id": "task-run", "timestamp": "2026-01-01T00:00:00Z"}], "executor_ids": ["executor"], "changed_files": []})
-        core.record_run_report(root, state, report); core.complete_run(root, state, report)
+        core.record_run_report(root, state, report)
+        if advance:
+            core.complete_run(root, state, report)
         return plan_hash, matrix_hash, package_record
+
+    def submission(self, root, state, artifacts):
+        loop = state["current_loop"]
+        iteration = 0 if loop == "project-init" else state["plan_iteration"]
+        ref = self.write(root, state, f"{loop}/iteration-{iteration}/stage-submission.json", {
+            "loop": loop, "iteration": iteration, "artifacts": artifacts,
+        })
+        core.record_stage_submission(root, state, ref)
+        return ref
+
+    def test_stage_executor_advances_init_and_replans_review_from_submissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            packet_ref, packet = self.packet(root, state, "project-init")
+            gate = self.gate(root, state, "project-init"); self.integrations(root, state, "project-init")
+            outputs = []
+            for name in ("charter", "design", "roadmap"):
+                outputs.append(self.write(root, state, f"project-init/iteration-0/{name}.json", {
+                    "input_packet_hash": packet["content_hash"], "quality_gate_hash": gate["judge"]["content_hash"],
+                    "goal": name, "scope": [], "requirements": [], "non_goals": [], "assumptions": [], "risks": [], "safety_approval_policy": [], "success_criteria": [], "open_decisions": [],
+                }))
+            self.submission(root, state, {"input_packet": packet_ref, "charter": outputs[0], "design": outputs[1], "roadmap": outputs[2]})
+            expected = continuation_runner._state_identity(state); core.save(root, state)
+            receipt = continuation_runner.execute_stage(root, expected)
+            state = core.load(root)
+            self.assertEqual(receipt["command"], "complete-init")
+            self.assertEqual(state["current_loop"], "project-plan")
+            self.complete_plan(root, state); self.complete_run(root, state)
+            revision = state["plan_revisions"][-1]
+            review = self.write(root, state, "project-review/iteration-1/review-executor.json", {
+                "plan_revision_hash": revision["execution_plan"]["content_hash"], "validation_matrix_hash": revision["validation_matrix"]["content_hash"],
+                "prompt_package_hash": state["prompt_package"]["content_hash"], "run_report_hash": state["run_report"]["content_hash"],
+                "acceptance_results": [{"criterion_id": "criterion-1", "verdict": "FAIL", "evidence_refs": ["e"], "confidence": 1}], "reviewer_ids": ["reviewer"],
+            })
+            review_record = core.record_review_artifact(root, state, review)
+            remediation = self.write(root, state, "project-review/iteration-1/remediation-executor.json", {
+                "failed_acceptance_criteria": ["criterion-1"], "failure_evidence": ["e"], "plan_vs_actual": ["d"], "root_cause_or_uncertainty": "cause", "required_correction": "fix", "risk": "low", "non_deferrable": True,
+                "prior_plan_revision_hash": revision["execution_plan"]["content_hash"], "review_artifact_hash": review_record["content_hash"],
+            })
+            state["remediation_packet"] = core.record_remediation_packet(root, state, remediation)
+            self.submission(root, state, {"review_artifact": review, "remediation_packet": remediation})
+            expected = continuation_runner._state_identity(state); core.save(root, state)
+            receipt = continuation_runner.execute_stage(root, expected)
+            state = core.load(root)
+            self.assertEqual(receipt["command"], "replan")
+            self.assertEqual((state["current_loop"], state["plan_iteration"]), ("project-plan", 2))
+
+    def test_stage_executor_rejects_missing_submission_and_stale_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True); core.save(root, state)
+            expected = continuation_runner._state_identity(state)
+            with self.assertRaisesRegex(core.PolicyError, "submission"):
+                continuation_runner.execute_stage(root, expected)
+            state["current_loop"] = "project-plan"; core.save(root, state)
+            with self.assertRaisesRegex(core.PolicyError, "unexpected state"):
+                continuation_runner.execute_stage(root, expected)
+
+    def test_stage_executor_advances_run_and_completes_passing_review(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.complete_init(root, state); self.complete_plan(root, state)
+            plan_hash, matrix_hash, package = self.complete_run(root, state, advance=False)
+            report = state["run_report"]["artifact_ref"]
+            self.submission(root, state, {"run_report": report})
+            expected = continuation_runner._state_identity(state); core.save(root, state)
+            self.assertEqual(continuation_runner.execute_stage(root, expected)["command"], "review")
+            state = core.load(root)
+            self.assertEqual(state["current_loop"], "project-review")
+            review = self.write(root, state, "project-review/iteration-1/review-pass-executor.json", {
+                "plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash,
+                "prompt_package_hash": package["content_hash"], "run_report_hash": state["run_report"]["content_hash"],
+                "acceptance_results": [{"criterion_id": "criterion-1", "verdict": "PASS", "evidence_refs": ["e"], "confidence": 1}], "reviewer_ids": ["reviewer"],
+            })
+            core.record_review_artifact(root, state, review)
+            self.submission(root, state, {"review_artifact": review})
+            expected = continuation_runner._state_identity(state); core.save(root, state)
+            self.assertEqual(continuation_runner.execute_stage(root, expected)["command"], "review-complete")
+            self.assertEqual(core.load(root)["outcome"], "COMPLETE")
+
+    def test_stage_executor_defers_nonmandatory_review_finding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent", full_lifecycle=True)
+            self.complete_init(root, state); self.complete_plan(root, state, mandatory=False)
+            plan_hash, matrix_hash, package = self.complete_run(root, state)
+            review = self.write(root, state, "project-review/iteration-1/review-defer-executor.json", {
+                "plan_revision_hash": plan_hash, "validation_matrix_hash": matrix_hash,
+                "prompt_package_hash": package["content_hash"], "run_report_hash": state["run_report"]["content_hash"],
+                "acceptance_results": [{"criterion_id": "criterion-1", "verdict": "FAIL", "evidence_refs": ["e"], "confidence": 1}], "reviewer_ids": ["reviewer"],
+            })
+            core.record_review_artifact(root, state, review)
+            backlog = self.write(root, state, "project-review/iteration-1/backlog-executor.json", {
+                "impact": "low", "rationale": "not required", "owner": "owner", "revisit_trigger": "next release", "evidence_refs": ["e"], "criterion_ids": ["criterion-1"],
+            })
+            self.submission(root, state, {"review_artifact": review, "backlog_item": backlog})
+            expected = continuation_runner._state_identity(state); core.save(root, state)
+            self.assertEqual(continuation_runner.execute_stage(root, expected)["command"], "defer")
+            self.assertEqual(core.load(root)["outcome"], "DEFERRED_BACKLOG")
+
 
     def test_hash_bound_initial_and_replan_paths(self):
         with tempfile.TemporaryDirectory() as temp:

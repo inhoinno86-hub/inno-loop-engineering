@@ -149,6 +149,13 @@ prompt hash에 묶이며, review는 현재 plan·matrix·prompt·report의 hash�
 PASS를 다시 계산합니다. 실행 명령, 변경 파일, 결과, deviation, checkpoint는 run
 artifact로 남겨야 합니다.
 
+각 continuation worker는 artifact를 기록한 뒤 현재 loop/iteration과 artifact ref만
+담은 `record-stage-submission --artifact <ref>`를 남깁니다. worker가 lifecycle
+전이 명령을 선택하지 않습니다. supervisor의 stage executor가 fresh state와 submission
+hash를 확인한 뒤 `complete-init`, `complete-plan`, `review`, `review-complete`,
+`replan`, `defer` 중 현재 단계에서 허용되는 한 명령만 Shared Core로 호출합니다.
+누락·오래됨·동시 변경된 submission은 fail-closed `BLOCKED`입니다.
+
 ## 자동 lifecycle supervisor와 host bridge
 
 `continue-until-terminal`은 lifecycle을 이어 가는 supervisor입니다. `project-run`과
@@ -246,7 +253,7 @@ budget을 잘못 초과 처리하지 않도록 합니다.
 | 승인·재개·실패 기록 | `request-approval`, `resume`, `failure` |
 | alert 관리 | `alerts pending`, `alerts ack` |
 | agent registry·health | `registry add/update/list`, `health report/status/reconcile`, `heartbeat touch/status` |
-| 증적 등록 | `record-input-packet`, `record-quality-gate`, `record-execution-policy`, `record-prompt-package`, `record-validation-receipt`, `record-run-report`, `record-review-artifact` |
+| 증적 등록 | `record-input-packet`, `record-quality-gate`, `record-execution-policy`, `record-prompt-package`, `record-validation-receipt`, `record-run-report`, `record-review-artifact`, `record-stage-submission` |
 | epistemic/trajectory | `record-epistemic-ledger`, `record-trajectory-summary`, `retrieve-trajectories` |
 
 직접 CLI로 lifecycle event를 호출할 때도 각 command의 실제 evidence가 있어야 합니다.
