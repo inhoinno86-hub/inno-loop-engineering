@@ -688,6 +688,12 @@ def record_quality_gate(project_root: Path, state: dict, loop: str, analysis_ref
     record = {"loop": loop, "iteration": iteration, "input_packet_hash": packet["content_hash"], "analyses": analyses, "judge": judge_descriptor, "mediator": mediator, "consistency_score": score, "material_contradictions": sorted(critical), "human_decision_requirement_ids": sorted(human_decisions), "accepted": accepted}
     state["quality_gates"][_packet_key(loop, iteration)] = record
     add_evidence(state, "quality-gate", json.dumps(record, sort_keys=True))
+    if record.get("consistency_score", 1.0) < 0.5:
+        block(state, "quality_gate_low_consistency", True,
+              f"consistency_score={record.get('consistency_score')} < 0.5")
+    if judge.get("requirements_coverage_ratio", 1.0) < 1.0:
+        block(state, "quality_gate_requirements_coverage", True,
+              f"requirements_coverage_ratio={judge.get('requirements_coverage_ratio')} < 1.0")
     if (not canonical and score < 50) or critical or human_decisions:
         block(state, "quality_gate_unresolved", True, json.dumps(record, sort_keys=True))
     return record
