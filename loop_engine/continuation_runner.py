@@ -110,10 +110,17 @@ def execute_stage(root: Path, expected: dict) -> dict:
         if not failures:
             core.complete_review(root, state, review_ref); command = "review-complete"
         elif failures & protected:
-            remediation = artifacts.get("remediation_packet", "")
-            if not state.get("remediation_packet") or state["remediation_packet"]["artifact_ref"] != remediation:
-                raise core.PolicyError("failing protected review requires recorded remediation packet")
-            core.transition(state, "replan", remediation); command = "replan"
+            classification = review.get("failure_classification")
+            if classification in ("execution_nonconformance", "indeterminate"):
+                remediation = artifacts.get("execution_remediation_packet", "")
+                if not state.get("execution_remediation_packet") or state["execution_remediation_packet"]["artifact_ref"] != remediation:
+                    raise core.PolicyError("execution retry requires recorded execution remediation packet")
+                core.transition(state, "retry-run", remediation); command = "retry-run"
+            else:
+                remediation = artifacts.get("remediation_packet", "")
+                if not state.get("remediation_packet") or state["remediation_packet"]["artifact_ref"] != remediation:
+                    raise core.PolicyError("failing protected review requires recorded remediation packet")
+                core.transition(state, "replan", remediation); command = "replan"
         else:
             backlog = artifacts.get("backlog_item", "")
             if not backlog:

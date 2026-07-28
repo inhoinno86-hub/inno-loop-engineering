@@ -578,3 +578,23 @@ class LoopEngineTest(unittest.TestCase):
             core.transition(state, "resume", json.dumps({"owner_id": "owner", "owner_role": "project-owner", "blocked_reason": blocked["reason"], "blocked_evidence": blocked["evidence"], "decision": "resume", "remediation_status": "resolved", "remediation_evidence_refs": ["baseline"], "next_attempt_policy": {"mode": "retry"}}))
             self.assertEqual(state["alerts"][0]["delivery"], "RESOLVED")
             self.assertEqual(core.pending_alerts(state), [])
+
+    def test_execution_remediation_retry_is_bounded_and_clears_prior_attempt_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); state = core.initialize(root, "intent")
+            state["current_loop"] = "project-review"
+            state["execution_policy"] = {"artifact_ref": "policy", "content_hash": "p"}
+            state["prompt_package"] = {"artifact_ref": "package", "content_hash": "q"}
+            state["run_report"] = {"artifact_ref": "report", "content_hash": "r"}
+            state["validation_receipts"] = [{"artifact_ref": "receipt", "content_hash": "s"}]
+            state["execution_remediation_packet"] = {"artifact_ref": "retry.json", "content_hash": "retry", "packet": {"classification": "execution_nonconformance"}}
+            core.transition(state, "retry-run", "retry.json")
+            self.assertEqual(state["current_loop"], "project-run")
+            self.assertEqual(state["run_attempt"], 2)
+            self.assertIsNone(state["execution_policy"])
+            self.assertIsNone(state["prompt_package"])
+            self.assertIsNone(state["run_report"])
+            self.assertEqual(state["validation_receipts"], [])
+            state["current_loop"] = "project-review"
+            with self.assertRaisesRegex(core.PolicyError, "maximum run attempts"):
+                core.transition(state, "retry-run", "retry.json")

@@ -17,4 +17,10 @@ only nonmandatory, noncritical findings it must reference a backlog item. The
 supervisor uses the core result to select `review-complete`, `replan`, or
 `defer`; a worker must not select the transition itself.
 
+Review also evaluates protected init intent-baseline requirements separately
+from plan criteria. An evidenced `execution_nonconformance` or allowed
+diagnostic `indeterminate` finding uses an execution-remediation packet and is
+selected by the supervisor as `retry-run`; plan defects and protected intent
+failures use plan remediation and `replan`.
+
 Do not turn critical, security, privacy, budget, or DoD failures into deferred backlog.

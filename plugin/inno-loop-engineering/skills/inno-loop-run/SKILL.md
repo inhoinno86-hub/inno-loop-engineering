@@ -19,4 +19,9 @@ matrix hashes. A prior plan revision's package is audit-only and cannot advance
 the current run. Superpowers execution practices require task-scoped explicit
 opt-in; absent opt-in uses normal Codex execution with the same evidence.
 
+For a supervisor-selected retry, first consume the recorded execution
+remediation packet. `make-prompts` must create a fresh package bound to that
+packet and the new `run_attempt`; `exec-prompts` executes only that package.
+Never reuse prior instructions or receipts as current proof.
+
 External effects, secrets, uncertain risk, and policy-limit breaches require a pending approval request and remain `BLOCKED`. Superpowers is optional and requires task-scoped opt-in.
